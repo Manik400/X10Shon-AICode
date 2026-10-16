@@ -1,0 +1,11 @@
+agent/.venv/
+agent/benchmarks/results/
+**/node_modules/
+**/dist/
+**/__pycache__/
+**/.pytest_cache/
+agent/.env
+*.db
+*.db-wal
+*.db-shm
+data/

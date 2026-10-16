@@ -1,0 +1,68 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Local-First Agent</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <h1>Local-First Agent</h1>
+    <div class="card">
+      <div class="row"><span>Local agent</span><span id="conn" class="pill">…</span></div>
+      <div class="row"><span>Pairing</span><span id="paired" class="pill">…</span></div>
+      <div id="connError" class="notice err small" hidden></div>
+      <div class="row">
+        <button id="reconnect">Reconnect</button>
+        <button id="openDashboard">Open dashboard</button>
+      </div>
+    </div>
+
+    <h2>Current tab</h2>
+    <div class="card">
+      <div id="tabTitle"></div>
+      <div id="tabUrl" class="url muted"></div>
+      <div class="row">
+        <span>Site access</span><span id="sitePermitted" class="pill">…</span>
+      </div>
+      <div class="row">
+        <button id="allowSite" class="primary">Allow this site</button>
+        <button id="importJob">Add as job</button>
+      </div>
+      <div id="tabMsg" class="small muted"></div>
+    </div>
+
+    <h2>Agent</h2>
+    <div class="card">
+      <div class="row"><span>State</span><span id="agentState" class="pill">idle</span></div>
+      <div id="taskBox" class="small"></div>
+      <div id="waitingBox" class="notice" hidden></div>
+      <div id="approvalsBox" class="stack"></div>
+      <div class="row">
+        <button id="pauseAll" class="danger">Pause all</button>
+        <button id="resumeAll">Resume</button>
+        <button id="cancelTask">Cancel task</button>
+      </div>
+    </div>
+
+    <h2>Apply on this page</h2>
+    <div class="card stack">
+      <div class="small muted">The agent finds the job and its application form on this tab, fills it from your profile, clicks through the steps and submits according to the policy below. It pauses only for a login, a verification challenge, or an answer it does not have.</div>
+      <div class="row">
+        <button id="applyHere" class="primary">Apply on this page</button>
+        <button id="scoreHere">Import &amp; score only</button>
+      </div>
+      <label class="row small"><input type="checkbox" id="autoSubmit" /> Submit without asking me (auto-submit)</label>
+      <div id="applyMsg" class="small muted"></div>
+    </div>
+
+    <h2>Run a task on this tab</h2>
+    <div class="card stack">
+      <textarea id="instruction" placeholder="e.g. Extract this job and score it / Fill this application form with my profile"></textarea>
+      <div class="row">
+        <button id="runTask" class="primary">Run</button>
+        <span id="runMsg" class="small muted"></span>
+      </div>
+    </div>
+    <script src="sidepanel.js"></script>
+  </body>
+</html>

@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Software Engineer – Apply at Acme Robotics</title>
+<style>body{font-family:sans-serif;max-width:720px;margin:2rem auto} label{display:block;margin-top:.6rem} .hidden{display:none} .error{color:#b00}</style>
+</head>
+<body>
+<h1>Apply: Software Engineer</h1>
+<p>Acme Robotics · Remote (US) · Full-time</p>
+<form id="apply" novalidate>
+  <fieldset><legend>Contact</legend>
+    <label for="fn">First name *</label><input id="fn" name="first_name" required>
+    <label for="ln">Last name *</label><input id="ln" name="last_name" required>
+    <label for="em">Email *</label><input id="em" name="email" type="email" required>
+    <label for="ph">Phone</label><input id="ph" name="phone" type="tel">
+    <label for="city">City</label><input id="city" name="city">
+  </fieldset>
+  <fieldset><legend>Links</legend>
+    <label for="li">LinkedIn profile</label><input id="li" name="linkedin" type="url">
+    <label for="gh">GitHub</label><input id="gh" name="github" type="url">
+  </fieldset>
+  <fieldset><legend>Resume</legend>
+    <label for="resume">Resume / CV *</label><input id="resume" name="resume" type="file" accept=".pdf,.doc,.docx" required>
+  </fieldset>
+  <fieldset><legend>Eligibility</legend>
+    <label for="auth">Are you legally authorized to work in the United States? *</label>
+    <select id="auth" name="work_auth" required><option value="">Select…</option><option>Yes</option><option>No</option></select>
+    <label for="spons">Will you now or in the future require sponsorship for employment visa status? *</label>
+    <select id="spons" name="sponsorship" required><option value="">Select…</option><option>Yes</option><option>No</option></select>
+    <fieldset><legend>Preferred work arrangement</legend>
+      <label><input type="radio" name="arrangement" value="remote"> Remote</label>
+      <label><input type="radio" name="arrangement" value="hybrid"> Hybrid</label>
+      <label><input type="radio" name="arrangement" value="onsite"> On-site</label>
+    </fieldset>
+  </fieldset>
+  <fieldset><legend>Additional</legend>
+    <label for="yrs">Years of experience *</label><input id="yrs" name="years" type="number" min="0" required>
+    <label for="why">Why do you want to work at Acme?</label><textarea id="why" name="why"></textarea>
+    <label><input type="checkbox" id="consent" name="consent" required> I consent to the processing of my data as described in the privacy policy *</label>
+  </fieldset>
+  <div id="errors" class="error" role="alert" hidden></div>
+  <button type="submit" id="submit">Submit application</button>
+</form>
+<section id="done" class="hidden">
+  <h2>Thank you for applying!</h2>
+  <p>Your application has been received. Reference number: <strong id="ref"></strong></p>
+</section>
+<script>
+document.getElementById('apply').addEventListener('submit', function (e) {
+  e.preventDefault();
+  var f = e.target, missing = [];
+  ['first_name','last_name','email','years','work_auth','sponsorship'].forEach(function (n) { if (!f.elements[n].value) missing.push(n); });
+  if (!f.elements.resume.files.length) missing.push('resume');
+  if (!f.elements.consent.checked) missing.push('consent');
+  var err = document.getElementById('errors');
+  if (missing.length) { err.hidden = false; err.textContent = 'Please complete: ' + missing.join(', '); return; }
+  err.hidden = true;
+  f.classList.add('hidden');
+  document.getElementById('ref').textContent = 'ACME-' + Math.floor(100000 + Math.random() * 900000);
+  document.getElementById('done').classList.remove('hidden');
+  history.replaceState({}, '', location.pathname + '?submitted=1');
+});
+</script>
+</body></html>

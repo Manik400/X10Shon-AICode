@@ -1,0 +1,39 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Orbit Labs - Data Engineer</title>
+<style>.application-question{margin:12px 0}.application-label{display:block;font-weight:600}</style></head>
+<body>
+<div class="posting-headline"><h2>Data Engineer</h2><div class="posting-categories"><span>Remote – US</span><span>Full time</span></div></div>
+<div class="section page-centered application-form">
+<form id="application-form" action="/thanks">
+  <div class="application-question"><label class="application-label" for="name">Full name<span class="required">✱</span></label><input id="name" name="name" type="text" required></div>
+  <div class="application-question"><label class="application-label" for="email">Email<span class="required">✱</span></label><input id="email" name="email" type="email" required></div>
+  <div class="application-question"><label class="application-label" for="phone">Phone<span class="required">✱</span></label><input id="phone" name="phone" type="text" required></div>
+  <div class="application-question"><label class="application-label" for="org">Current company</label><input id="org" name="org" type="text"></div>
+  <div class="application-question"><label class="application-label">Resume/CV<span class="required">✱</span></label><label class="resume-upload-label" for="resume-upload-input">ATTACH RESUME/CV</label><input id="resume-upload-input" name="resume" type="file" style="width:0;height:0;opacity:0;position:absolute"></div>
+  <div class="application-question"><label class="application-label" for="urls[LinkedIn]">LinkedIn URL</label><input id="urls[LinkedIn]" name="urls[LinkedIn]" type="text"></div>
+  <div class="application-question"><label class="application-label" for="urls[GitHub]">GitHub URL</label><input id="urls[GitHub]" name="urls[GitHub]" type="text"></div>
+  <div class="application-question">
+    <div class="application-label">Will you require sponsorship now or in the future?<span class="required">✱</span></div>
+    <label><input type="radio" name="cards[sponsorship]" value="Yes"> Yes</label>
+    <label><input type="radio" name="cards[sponsorship]" value="No"> No</label>
+  </div>
+  <div class="application-question"><label class="application-label" for="comments">Additional information</label><textarea id="comments" name="comments"></textarea></div>
+  <div class="application-question"><label class="application-label" for="eeo_veteran">Veteran status (optional)</label><select id="eeo_veteran" name="eeo[veteran]"><option value="">Select…</option><option>I am not a veteran</option><option>I am a veteran</option><option>Decline to self-identify</option></select></div>
+  <div id="application-errors" role="alert" style="display:none;color:#c00"></div>
+  <button type="submit" class="postings-btn">Submit application</button>
+</form>
+</div>
+<script>
+document.getElementById('application-form').addEventListener('submit', function (e) {
+  e.preventDefault();
+  var f = e.target, errs = [];
+  ['name','email','phone'].forEach(function (n) { if (!f.elements[n].value) errs.push(n + ' is required'); });
+  if (!f.elements.resume.files.length) errs.push('Resume is required');
+  if (!f.querySelector('input[name="cards[sponsorship]"]:checked')) errs.push('Sponsorship answer is required');
+  var box = document.getElementById('application-errors');
+  if (errs.length) { box.style.display = 'block'; box.textContent = errs.join('. '); return; }
+  document.body.innerHTML = '<div class="section"><h2>Application submitted</h2><p>Thanks for applying to Orbit Labs.</p></div>';
+  history.replaceState({}, '', location.pathname.replace(/[^/]*$/, 'thanks'));
+});
+</script>
+</body></html>

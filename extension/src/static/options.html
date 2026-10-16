@@ -1,0 +1,44 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Local-First Agent – Pairing &amp; settings</title>
+    <link rel="stylesheet" href="styles.css" />
+    <style>
+      body { max-width: 640px; margin: 24px auto; }
+    </style>
+  </head>
+  <body>
+    <h1>Pairing &amp; settings</h1>
+    <div class="card stack">
+      <label>Local agent URL <input id="agentUrl" value="http://127.0.0.1:8765" /></label>
+      <div class="small muted">Only loopback addresses are supported. The agent never listens on other interfaces by default.</div>
+      <button id="saveUrl">Save</button>
+    </div>
+
+    <h2>Pairing</h2>
+    <div class="card stack">
+      <div class="row"><span>Status</span><span id="paired" class="pill">…</span></div>
+      <p class="small muted">Open the dashboard at the agent URL, go to Settings → Extension pairing, click "Generate pairing code", then enter the 8-character code here. Codes expire after 5 minutes.</p>
+      <label>Pairing code <input id="code" maxlength="8" placeholder="ABCD2345" autocomplete="off" /></label>
+      <div class="row">
+        <button id="pair" class="primary">Pair</button>
+        <button id="unpair" class="danger">Unpair</button>
+      </div>
+      <div id="msg" class="small"></div>
+    </div>
+
+    <h2>Site access</h2>
+    <div class="card stack">
+      <p class="small muted">The agent can only act on sites you allowed from the side panel. Revoke any site below.</p>
+      <ul id="origins"></ul>
+    </div>
+
+    <h2>Privacy</h2>
+    <div class="card small muted">
+      Page content is sent only to the local agent on your machine. No cookies, passwords or tokens are ever read or stored.
+      To stop everything: unpair here, remove the extension, and stop the agent process.
+    </div>
+    <script src="options.js"></script>
+  </body>
+</html>

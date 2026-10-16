@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "agent",
+      "runtimeExecutable": "agent/.venv/Scripts/python.exe",
+      "runtimeArgs": ["agent/run.py"],
+      "port": 8765
+    },
+    {
+      "name": "dashboard-dev",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "dashboard", "run", "dev"],
+      "port": 5173
+    }
+  ]
+}

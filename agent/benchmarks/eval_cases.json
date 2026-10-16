@@ -1,0 +1,80 @@
+[
+  {
+    "name": "intent_apply",
+    "task": "intent",
+    "inputs": {"instruction": "Fill in this application with my profile and get it ready to submit", "url": "https://boards.greenhouse.io/acme/jobs/1"},
+    "expect": {"kind": "apply"}
+  },
+  {
+    "name": "intent_extract",
+    "task": "intent",
+    "inputs": {"instruction": "Save this job and score it against my profile", "url": "https://example.com/jobs/9"},
+    "expect": {"kind": "extract_job"}
+  },
+  {
+    "name": "intent_read",
+    "task": "intent",
+    "inputs": {"instruction": "Summarise what this page says about the benefits", "url": null},
+    "expect": {"kind": "read"}
+  },
+  {
+    "name": "extract_plain_posting",
+    "task": "extract_job",
+    "inputs": {
+      "url": "https://lumen.example/careers/frontend",
+      "title": "Frontend Engineer at Lumen Health",
+      "text": "Frontend Engineer Location: Austin, TX · Hybrid · Full-time About the role Lumen Health builds patient portals. You will own the React front end. Requirements 3+ years of experience with React and TypeScript. Experience with accessibility (WCAG). Familiarity with GraphQL is a plus. Salary range: $120,000 - $150,000."
+    },
+    "expect": {"title": {"contains": "Frontend Engineer"}, "company": {"contains": "Lumen"}, "remote_type": "hybrid", "experience_min_years": {"min": 3}, "salary_min": {"min": 120000}}
+  },
+  {
+    "name": "extract_remote_posting",
+    "task": "extract_job",
+    "inputs": {
+      "url": "https://northwind.example/jobs/py",
+      "title": "Senior Python Developer - Northwind Analytics",
+      "text": "Northwind Analytics is hiring a Senior Python Developer. Fully remote within the EU. Requirements: 5+ years of Python, FastAPI, PostgreSQL, Docker. Compensation EUR 70,000 - 90,000."
+    },
+    "expect": {"title": {"contains": "Python"}, "remote_type": "remote", "experience_min_years": {"min": 5}}
+  },
+  {
+    "name": "map_contact_fields",
+    "task": "map_fields",
+    "inputs": {
+      "fields": [
+        {"node": 0, "label": "First name", "type": "text", "options": [], "required": true, "section": "Contact"},
+        {"node": 1, "label": "E-mail address", "type": "email", "options": [], "required": true, "section": "Contact"},
+        {"node": 2, "label": "Are you legally authorized to work in the United States?", "type": "select", "options": ["Yes", "No"], "required": true, "section": "Eligibility"},
+        {"node": 3, "label": "Favourite colour", "type": "text", "options": [], "required": false, "section": null}
+      ],
+      "fact_keys": ["contact.first_name", "contact.last_name", "contact.email", "legal.work_authorization"],
+      "answers": []
+    },
+    "expect": {"mappings": [{"node": 0, "profile_key": "contact.first_name"}, {"node": 1, "profile_key": "contact.email"}, {"node": 2, "profile_key": "legal.work_authorization", "legally_significant": true}, {"node": 3, "profile_key": null}]}
+  },
+  {
+    "name": "match_backend",
+    "task": "match_job",
+    "inputs": {
+      "title": "Backend Engineer",
+      "description": "We need strong Python and FastAPI skills, PostgreSQL, and Docker. Kubernetes is a plus.",
+      "requirements": ["4+ years Python", "FastAPI", "PostgreSQL"],
+      "skills": ["Python", "FastAPI", "PostgreSQL", "React"],
+      "experience_years": 6,
+      "summary": "Backend engineer."
+    },
+    "expect": {"semantic_score": {"min": 0.5}, "matched_skills": ["Python", "FastAPI"]}
+  },
+  {
+    "name": "plan_login_page_asks_user",
+    "task": "plan",
+    "inputs": {"goal": "apply", "instruction": "apply to this job", "facts": {}, "page_kind": "login", "auth_state": "logged_out", "page_text": "URL: https://x/login\nTITLE: Sign in\n[0] textbox \"Email\"\n[1] textbox \"Password\" type=password\n[2] button \"Sign in\"", "nodes": [], "history": [], "url": "https://x/login"},
+    "expect": {"page_state": "login", "first_action_type": "ask_user"}
+  },
+  {
+    "name": "plan_job_page_clicks_apply",
+    "task": "plan",
+    "inputs": {"goal": "apply", "instruction": "apply to this job", "facts": {}, "page_kind": "job_description", "auth_state": "unknown", "page_text": "URL: https://x/jobs/1\nTITLE: Engineer\n[0] heading \"Engineer\"\n[1] link \"Apply now\"\n[2] link \"Home\"", "nodes": [{"i": 1, "role": "link", "name": "Apply now"}], "history": [], "url": "https://x/jobs/1"},
+    "expect": {"first_action_type": "click"}
+  }
+]

@@ -1,0 +1,45 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Apply – QA Engineer at Stepwise Inc</title>
+<style>.step{display:none}.step.active{display:block}label{display:block;margin:8px 0}</style></head>
+<body>
+<h1>QA Engineer application</h1>
+<form id="wizard" novalidate>
+  <section class="step active" data-step="1"><h2>Step 1: About you</h2>
+    <label>First name *<input name="first_name" required></label>
+    <label>Last name *<input name="last_name" required></label>
+    <label>Email *<input name="email" type="email" required></label>
+    <label>Do you have test automation experience? *<select name="automation" required><option value="">Choose</option><option>Yes</option><option>No</option></select></label>
+    <div id="s1-extra" style="display:none"><label>Which frameworks? *<input name="frameworks" required></label></div>
+    <button type="button" class="next">Next</button>
+  </section>
+  <section class="step" data-step="2"><h2>Step 2: Experience</h2>
+    <label>Current company<input name="company"></label>
+    <label>Years of experience *<input name="years" type="number" required></label>
+    <label>Resume *<input name="resume" type="file" required></label>
+    <button type="button" class="back">Back</button><button type="button" class="next">Next</button>
+  </section>
+  <section class="step" data-step="3"><h2>Step 3: Review</h2>
+    <p>Please review and submit.</p>
+    <label><input type="checkbox" name="agree" required> I confirm the information above is accurate *</label>
+    <div id="err" role="alert" style="display:none;color:red"></div>
+    <button type="button" class="back">Back</button><button type="submit">Submit</button>
+  </section>
+</form>
+<div id="confirm" style="display:none"><h2>Application received</h2><p>Confirmation ID: <span>SW-<b id="cid"></b></span></p></div>
+<script>
+var cur = 1;
+function show(n) { document.querySelectorAll('.step').forEach(function (s) { s.classList.toggle('active', +s.dataset.step === n); }); cur = n; }
+document.querySelector('select[name=automation]').addEventListener('change', function () { document.getElementById('s1-extra').style.display = this.value === 'Yes' ? 'block' : 'none'; });
+document.querySelectorAll('.next').forEach(function (b) { b.addEventListener('click', function () {
+  var sec = b.closest('.step'); var bad = Array.from(sec.querySelectorAll('[required]')).filter(function (i) { return i.offsetParent !== null && !(i.type === 'file' ? i.files.length : i.value); });
+  if (bad.length) { bad.forEach(function (i) { i.setAttribute('aria-invalid', 'true'); }); return; }
+  show(cur + 1);
+}); });
+document.querySelectorAll('.back').forEach(function (b) { b.addEventListener('click', function () { show(cur - 1); }); });
+document.getElementById('wizard').addEventListener('submit', function (e) {
+  e.preventDefault();
+  if (!e.target.agree.checked) { var er = document.getElementById('err'); er.style.display = 'block'; er.textContent = 'You must confirm the information is accurate.'; return; }
+  e.target.style.display = 'none'; document.getElementById('cid').textContent = '4471'; document.getElementById('confirm').style.display = 'block';
+});
+</script>
+</body></html>

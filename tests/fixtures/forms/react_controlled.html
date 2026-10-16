@@ -1,0 +1,24 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Controlled inputs</title></head>
+<body>
+<div id="root"></div>
+<script>
+// Minimal controlled-input emulation: a value tracker like React's that only updates state when
+// an 'input' event reports a value different from what the tracker last saw.
+var state = { name: '' };
+var root = document.getElementById('root');
+root.innerHTML = '<label for="n">Preferred name</label><input id="n"><pre id="state"></pre>';
+var input = document.getElementById('n');
+var tracker = { value: '' };
+var nativeDesc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+Object.defineProperty(input, 'value', {
+  get: function () { return nativeDesc.get.call(this); },
+  set: function (v) { tracker.value = v; nativeDesc.set.call(this, v); },
+  configurable: true
+});
+input.addEventListener('input', function (e) {
+  var v = nativeDesc.get.call(e.target);
+  if (v !== tracker.value) { state.name = v; tracker.value = v; document.getElementById('state').textContent = JSON.stringify(state); }
+});
+</script>
+</body></html>

@@ -1,0 +1,10 @@
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+
+// Dev: API calls go to the local agent. Prod: the agent serves dist/ itself (same origin).
+export default defineConfig({
+  plugins: [react()],
+  server: { port: 5173, strictPort: true, host: '127.0.0.1', proxy: { '/api': { target: 'http://127.0.0.1:8765', changeOrigin: false } } },
+  build: { outDir: 'dist', sourcemap: false, target: 'es2020' },
+  test: { environment: 'jsdom', globals: true, setupFiles: ['tests/setup.ts'], include: ['tests/**/*.test.{ts,tsx}'] },
+});

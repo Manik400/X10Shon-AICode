@@ -1,0 +1,52 @@
+:root {
+  --bg: #ffffff;
+  --fg: #1f2328;
+  --muted: #656d76;
+  --border: #d0d7de;
+  --accent: #0969da;
+  --ok: #1a7f37;
+  --warn: #9a6700;
+  --err: #cf222e;
+  --card: #f6f8fa;
+  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  font-size: 13px;
+  color: var(--fg);
+  background: var(--bg);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117;
+    --fg: #e6edf3;
+    --muted: #8d96a0;
+    --border: #30363d;
+    --accent: #58a6ff;
+    --ok: #3fb950;
+    --warn: #d29922;
+    --err: #f85149;
+    --card: #161b22;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; padding: 12px; background: var(--bg); color: var(--fg); min-width: 300px; }
+h1 { font-size: 15px; margin: 0 0 8px; }
+h2 { font-size: 13px; margin: 14px 0 6px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin-bottom: 10px; }
+.row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 4px 0; }
+.muted { color: var(--muted); }
+.pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; border: 1px solid var(--border); }
+.pill.ok { color: var(--ok); border-color: var(--ok); }
+.pill.warn { color: var(--warn); border-color: var(--warn); }
+.pill.err { color: var(--err); border-color: var(--err); }
+button { font: inherit; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--card); color: var(--fg); cursor: pointer; }
+button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+button.danger { color: var(--err); border-color: var(--err); }
+button:disabled { opacity: 0.5; cursor: default; }
+input, textarea { font: inherit; width: 100%; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--fg); }
+textarea { min-height: 56px; resize: vertical; }
+.stack { display: flex; flex-direction: column; gap: 6px; }
+.url { font-family: ui-monospace, monospace; font-size: 11px; word-break: break-all; }
+.notice { border-left: 3px solid var(--warn); padding: 6px 8px; background: var(--card); margin: 6px 0; }
+.notice.err { border-color: var(--err); }
+.notice.ok { border-color: var(--ok); }
+ul { margin: 4px 0; padding-left: 16px; }
+.small { font-size: 11px; }

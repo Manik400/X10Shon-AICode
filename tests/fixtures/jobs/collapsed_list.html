@@ -1,0 +1,22 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Job Hunt – saved searches</title></head>
+<body>
+<h1>Jobs</h1>
+<section>
+  <h2 role="button" tabindex="0" id="sec">Career-page searches</h2>
+  <div id="reports">
+    <div class="report">software engineer · last 7 days <button id="open1">Open</button> <button onclick="this.closest('.report').remove()">Remove from the list</button></div>
+  </div>
+</section>
+<section id="jobs" hidden>
+  <button id="back">Back</button>
+  <article><h3>Portal application</h3><a href="../auth/logged_in_form.html">Open</a> <a href="#">Contacts</a></article>
+  <article><h3>Software Engineer</h3><a href="../forms/simple_application.html">Open</a> <a href="#">Contacts</a></article>
+</section>
+<script>
+document.getElementById('open1').addEventListener('click', function () {
+  document.getElementById('reports').hidden = true;
+  document.getElementById('jobs').hidden = false;
+});
+</script>
+</body></html>
