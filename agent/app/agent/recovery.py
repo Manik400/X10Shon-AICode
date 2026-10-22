@@ -30,6 +30,15 @@ class RecoveryManager:
     def __init__(self, max_attempts: int = 3):
         self._max = max_attempts
 
+    @property
+    def max_retries(self) -> int:
+        """Automatic re-attempts allowed after the first attempt (0 = a failure is final)."""
+        return max(0, self._max - 1)
+
+    def set_max_retries(self, retries: int) -> None:
+        """Follow the scheduler's ``max_retries`` setting: ``retries`` more attempts after the first."""
+        self._max = max(0, int(retries)) + 1
+
     def classify_result(self, action: BrowserAction, result: ActionResult) -> FailureInfo:
         try:
             cat = ErrorCategory(result.error_category or "UNKNOWN")

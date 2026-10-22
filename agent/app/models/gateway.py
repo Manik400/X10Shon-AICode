@@ -61,6 +61,7 @@ class ModelGateway:
         self._providers: dict[str, ModelProvider] = providers or {}
         self._semaphore = asyncio.Semaphore(max(1, settings.model_max_concurrency))
         self._cache = _Cache(settings.model_cache_ttl_seconds)
+        self._supervisor: Any = None  # OllamaSupervisor when ollama_autostart is on
         self.calls = 0
         self.cache_hits = 0
         self.failures = 0
@@ -91,17 +92,33 @@ class ModelGateway:
             out["providers"][name] = await self.provider(name).health()
         return out
 
+    async def warm_up(self) -> dict[str, bool]:
+        """Make sure every model a role uses is loaded (after start-up, reboot or sleep)."""
+        out: dict[str, bool] = {}
+        s = self._settings
+        if s.ollama_autostart and any(c.provider == "ollama" and c.model for c in s.model_roles.values()):
+            if self._supervisor is None:
+                from .ollama_supervisor import OllamaSupervisor
+
+                self._supervisor = OllamaSupervisor(s.ollama_base_url, exe=s.ollama_exe, models_dir=s.ollama_models_dir, gpu=s.gpu_enabled)
+            await self._supervisor.ensure_running()
+        for cfg in self._settings.model_roles.values():
+            if cfg.provider == "ollama" and cfg.model and cfg.model not in out:
+                provider = self.provider("ollama")
+                out[cfg.model] = await provider.warm_up(cfg.model)  # type: ignore[attr-defined]
+        return out
+
     async def close(self) -> None:
         for p in self._providers.values():
             await p.close()
 
     # ------------------------------------------------------------------ inference
-    async def complete(self, role: str, request: ModelRequest, output_model: type[T], *, task_id: str | None = None, use_cache: bool = True) -> T:
+    async def complete(self, role: str, request: ModelRequest, output_model: type[T], *, task_id: str | None = None, use_cache: bool = True, max_output_tokens: int | None = None) -> T:
         cfg = self.role_config(role)
         provider = self.provider(cfg.provider)
         request.json_schema = output_model.model_json_schema()
         request.temperature = cfg.temperature
-        request.max_output_tokens = cfg.max_output_tokens
+        request.max_output_tokens = max(cfg.max_output_tokens, max_output_tokens or 0)
         request.timeout_seconds = self._settings.model_request_timeout_seconds
         if len(request.prompt) > self._settings.model_context_chars:
             request.prompt = request.prompt[: self._settings.model_context_chars] + "\n…(truncated)"

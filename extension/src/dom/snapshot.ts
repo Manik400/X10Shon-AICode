@@ -4,15 +4,38 @@
  * reference table so `strategy: "node"` targets resolve to the exact element.
  */
 import { computeAccessibleName, computeRole, isDisabled, isVisible, normalizeText, sectionContext } from './accessibility';
+import { choiceQuestion, choiceRequired, choiceSelected } from './choice';
 import { collectSignals } from './signals';
 import type { FormInfo, PageSnapshot, SnapshotNode, SnapshotOptions } from './types';
+
+/** Enough to find "the same field" again after a framework re-render replaced the element. */
+export interface NodeFingerprint {
+  tag: string;
+  role: string;
+  name: string;
+  id: string;
+  nameAttr: string;
+  type: string;
+  /** Occurrence index among snapshot nodes with the same tag/role/name/nameAttr/type. */
+  nth: number;
+}
 
 export interface SnapshotRegistry {
   generation: number;
   elements: Element[];
+  fingerprints: NodeFingerprint[];
 }
 
-const registry: SnapshotRegistry = { generation: 0, elements: [] };
+const registry: SnapshotRegistry = { generation: 0, elements: [], fingerprints: [] };
+
+export function fingerprintKey(fp: Pick<NodeFingerprint, 'tag' | 'role' | 'name' | 'nameAttr' | 'type'>): string {
+  return [fp.tag, fp.role, fp.name, fp.nameAttr, fp.type].join('\u0001');
+}
+
+/** Every element the snapshot would list, in snapshot order (used to re-find re-rendered nodes). */
+export function* snapshotCandidates(doc: Document): Generator<Element> {
+  for (const { el } of walk(doc.body || doc.documentElement, 0)) yield el;
+}
 
 export function getRegistry(): SnapshotRegistry {
   return registry;
@@ -100,11 +123,23 @@ function hashString(s: string): string {
   return (h >>> 0).toString(16);
 }
 
+/** A real modal (it replaces the page for the user), not a dropdown / country-picker popup that
+ * also uses role="dialog". */
+function modalDialog(doc: Document): HTMLElement | null {
+  const candidates = Array.from(doc.querySelectorAll<HTMLElement>('dialog[open],[role="dialog"]:not([aria-hidden="true"]),[role="alertdialog"]'));
+  for (const d of candidates) {
+    if (d.getClientRects().length === 0) continue;
+    const isModal = d.matches('dialog[open]') || d.getAttribute('aria-modal') === 'true' || d.getAttribute('role') === 'alertdialog';
+    const isPicker = !!d.querySelector('[role="listbox"],[role="option"]') && d.querySelectorAll('input,textarea,button').length <= 3;
+    if (isModal && !isPicker) return d;
+  }
+  return null;
+}
+
 function bodyText(doc: Document, maxChars: number): string {
   const body = doc.body;
   if (!body) return '';
-  const dialog = doc.querySelector('[role="dialog"]:not([aria-hidden="true"]),dialog[open]') as HTMLElement | null;
-  const main = dialog || (doc.querySelector('main,[role="main"]') as HTMLElement | null) || body;
+  const main = modalDialog(doc) || (doc.querySelector('main,[role="main"]') as HTMLElement | null) || body;
   const text = normalizeText(main.innerText || main.textContent);
   return text.length > maxChars ? text.slice(0, maxChars) : text;
 }
@@ -114,6 +149,8 @@ export function buildSnapshot(doc: Document, opts: SnapshotOptions = {}): PageSn
   const maxText = opts.maxTextChars ?? 6000;
   registry.generation += 1;
   registry.elements = [];
+  registry.fingerprints = [];
+  const seenKeys = new Map<string, number>();
 
   const nodes: SnapshotNode[] = [];
   const forms: FormInfo[] = [];
@@ -121,7 +158,7 @@ export function buildSnapshot(doc: Document, opts: SnapshotOptions = {}): PageSn
   let truncated = false;
   let frames = 1;
   let maxFrame = 0;
-  const activeDialog = doc.querySelector('[role="dialog"]:not([aria-hidden="true"]),dialog[open]');
+  const activeDialog = modalDialog(doc);
 
   for (const { el, frame } of walk(doc.body || doc.documentElement, 0)) {
     if (frame > maxFrame) {
@@ -135,7 +172,8 @@ export function buildSnapshot(doc: Document, opts: SnapshotOptions = {}): PageSn
     if (role === 'form') {
       const f = el as HTMLFormElement;
       formIndex.set(el, forms.length);
-      forms.push({ index: forms.length, fields: [], submit_nodes: [], name: f.getAttribute('name') || f.id || null, action: f.getAttribute('action') });
+      // getAttribute, not f.id / f.name: a field named "id" or "name" shadows those properties.
+      forms.push({ index: forms.length, fields: [], submit_nodes: [], name: f.getAttribute('name') || f.getAttribute('id') || null, action: f.getAttribute('action') });
       continue;
     }
     if (role === 'option' && el.closest('select')) continue; // select options are listed on the select
@@ -148,6 +186,11 @@ export function buildSnapshot(doc: Document, opts: SnapshotOptions = {}): PageSn
     const i = registry.elements.length;
     registry.elements.push(el);
     const name = computeAccessibleName(el, role);
+    const fpBase = { tag: el.tagName.toLowerCase(), role, name, nameAttr: el.getAttribute('name') || '', type: (el.getAttribute('type') || '').toLowerCase() };
+    const fpKey = fingerprintKey(fpBase);
+    const nth = seenKeys.get(fpKey) ?? 0;
+    seenKeys.set(fpKey, nth + 1);
+    registry.fingerprints.push({ ...fpBase, id: el.id || '', nth });
     const node: SnapshotNode = {
       i,
       role,
@@ -237,6 +280,20 @@ export function buildSnapshot(doc: Document, opts: SnapshotOptions = {}): PageSn
     }
     if (role === 'heading' || role === 'alert' || role === 'status' || role === 'legend') {
       node.text = normalizeText((el as HTMLElement).innerText || el.textContent).slice(0, 300);
+    }
+    if (role === 'button') {
+      const question = choiceQuestion(el);
+      if (question) {
+        // Yes/No answer buttons: report as a radio group keyed by the question.
+        node.role = 'radio';
+        node.type = 'radio';
+        node.section = question.slice(0, 200);
+        node.name_attr = `choice:${hashString(question)}`;
+        node.checked = choiceSelected(el);
+        node.required = choiceRequired(el, question);
+        const fi = node.form;
+        if (typeof fi === 'number' && forms[fi]) forms[fi].submit_nodes = forms[fi].submit_nodes.filter((x: number) => x !== i);
+      }
     }
     nodes.push(node);
   }

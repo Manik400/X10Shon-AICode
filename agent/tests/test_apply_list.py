@@ -30,6 +30,23 @@ def test_extract_job_links_filters_navigation_and_dedupes() -> None:
     assert "https://example.com/about" not in urls  # generic external link is not a job
 
 
+def test_share_and_social_links_are_not_jobs_and_no_account_sites_come_first() -> None:
+    from app.jobs.listing import account_needed_rank
+
+    snap = _snap(
+        "https://manik400.github.io/Claude_P/#premium",
+        [
+            ("Share", "https://www.linkedin.com/feed/?shareActive=true&text=Fewer%2C%20better%20applications%20be"),
+            ("Post", "https://www.linkedin.com/sharing/share-offsite/?url=https://x.com/jobs"),
+            ("Open", "https://coke.wd1.myworkdayjobs.com/coca-cola-careers/job/US/Dev_R-1"),
+            ("Open", "https://jobs.ashbyhq.com/clera/7664408f-6561-4a88-a4d5-f46553604d06"),
+        ],
+    )
+    urls = [l["url"] for l in extract_job_links(snap)]
+    assert all("linkedin.com" not in u for u in urls)
+    assert sorted(urls, key=account_needed_rank)[0].startswith("https://jobs.ashbyhq.com")
+
+
 def test_extract_job_links_on_local_fixture_paths() -> None:
     snap = _snap("file:///C:/x/tests/fixtures/jobs/listing.html", [("Open", "../auth/logged_in_form.html"), ("Open", "../forms/simple_application.html"), ("Apply", "../forms/rejects_submission.html"), ("About this tool", "https://example.com/about"), ("Jobs", "#jobs")])
     urls = [l["url"] for l in extract_job_links(snap)]
@@ -94,14 +111,16 @@ async def test_dry_run_types_and_submits_nothing(ctx, sample_profile, resume_fil
 
 
 @pytest.mark.asyncio
-async def test_job_hunt_mode_refuses_other_pages(client) -> None:
+async def test_apply_works_beyond_the_job_hunt_list_but_not_on_mail(client) -> None:
     from .conftest import DASH_HEADERS
 
     s = client.get("/api/settings", headers=DASH_HEADERS).json()["scheduler"]
     s["home_list_url"] = "https://manik400.github.io/Claude_P"
     assert client.put("/api/settings", json=s, headers=DASH_HEADERS).status_code == 200
     r = client.post("/api/tasks", json={"instruction": "Apply to the job on this page", "url": "https://mail.google.com/mail/u/0/#inbox"}, headers=DASH_HEADERS)
-    assert r.status_code == 400 and "Job Hunt mode" in r.json()["detail"]
+    assert r.status_code == 400 and "not a job page" in r.json()["detail"]
+    r = client.post("/api/tasks", json={"instruction": "Apply to this job", "url": "https://job-boards.greenhouse.io/minitab/jobs/8030958003"}, headers=DASH_HEADERS)
+    assert r.status_code == 200 and r.json()["kind"] == "apply"  # any job page, not only the Job Hunt list
     r = client.post("/api/tasks", json={"instruction": "track my applications", "url": "https://mail.google.com/mail/u/0/#inbox"}, headers=DASH_HEADERS)
     assert r.status_code == 200 and r.json()["kind"] == "track"
 

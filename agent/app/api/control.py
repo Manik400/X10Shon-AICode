@@ -97,6 +97,13 @@ async def reload_extension(ctx: Ctx, _: Auth) -> dict:
     return {"sent": ok, "running": ctx.hub.status()["extension"].get("version"), "on_disk": dist_version()}
 
 
+@router.post("/control/notify-test")
+async def notify_test(ctx: Ctx, _: Auth) -> dict:
+    """Show a sample desktop alert (checks that notifications reach the user)."""
+    sent = await ctx.hub.push("notify", {"title": "Local-First Agent alerts are on", "message": "You will get an alert like this when a job needs you to sign in. Click it to jump to that tab.", "key": "test"})
+    return {"sent": sent}
+
+
 @router.get("/control/tabs/{tab_id}/snapshot")
 async def tab_snapshot(tab_id: int, ctx: Ctx, _: Auth) -> dict:
     """Compact snapshot of one tab (diagnostics: what the agent sees on that page)."""
@@ -106,7 +113,10 @@ async def tab_snapshot(tab_id: int, ctx: Ctx, _: Auth) -> dict:
         raise HTTPException(503, f"snapshot failed: {str(exc)[:200]}")
     from ..jobs.listing import extract_job_links
 
-    return {"url": snap.url, "title": snap.title, "nodes": [n.model_dump(exclude_none=True) for n in snap.nodes], "job_links": extract_job_links(snap)}
+    from ..browser.page_state import classify_page
+
+    cls = classify_page(snap)
+    return {"url": snap.url, "title": snap.title, "text_excerpt": (snap.text_excerpt or "")[:3000], "page_kind": cls.kind, "reasons": cls.reasons, "signals": snap.signals.model_dump(), "nodes": [n.model_dump(exclude_none=True) for n in snap.nodes], "job_links": extract_job_links(snap)}
 
 
 @router.post("/control/tabs/{tab_id}/close")

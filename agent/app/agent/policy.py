@@ -120,7 +120,9 @@ class PolicyEngine:
             if explicit_submit and self._submit_policy == "never":
                 return PolicyVerdict("allow", risk, "submission approved by policy configuration")
             return PolicyVerdict("needs_approval", risk, "high-risk action requires approval", approval_kind="submit" if explicit_submit else "high_risk_action")
-        wait = self._rate_limit_wait(current_url)
+        # The per-site delay paces page loads and clicks; filling fields on an already-loaded form
+        # is one human-like burst (8 s between fields made a 20-field form take minutes).
+        wait = self._rate_limit_wait(current_url) if action.type in ("navigate", "click", "press_key") else 0.0
         if wait > 0:
             return PolicyVerdict("allow", risk, f"rate limited: wait {wait:.1f}s", wait_seconds=wait)
         return PolicyVerdict("allow", risk, "ok")

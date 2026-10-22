@@ -240,9 +240,12 @@ async def test_extract_task_imports_and_scores_job(ctx, sample_profile) -> None:
     assert (await ctx.repos.applications.get_by_job(job["id"]))["state"] == "ELIGIBLE"
 
 
-async def test_read_task_uses_bounded_general_loop(ctx) -> None:
-    task = await ctx.repos.tasks.create("read", instruction="summarise this page", domain=fixture_url("jobs/plain_posting.html"))
+async def test_read_task_answers_from_the_page_without_acting(ctx) -> None:
+    task = await ctx.repos.tasks.create("read", instruction="summarise this page: what does Lumen Health do?", domain=fixture_url("jobs/plain_posting.html"))
     await ctx.tasks.start(task)
     t = await wait_task(ctx, task["id"])
-    assert t["status"] == "succeeded" and "Lumen Health" in t["result_json"]["extracted"]["text"]
-    assert t["action_count"] <= 3
+    assert t["status"] == "succeeded", t["failure_json"]
+    res = t["result_json"]
+    assert res["source"] == "page" and res["chars_read"] > 0 and res["answer"]
+    assert "Lumen Health" in res["answer"]  # offline fallback quotes the page itself
+    assert t["action_count"] == 0  # assistant mode never clicks, types or submits

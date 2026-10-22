@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class SnapshotNode(BaseModel):
@@ -51,6 +51,13 @@ class FormInfo(BaseModel):
     name: str | None = None
     action: str | None = None
 
+    @field_validator("name", "action", mode="before")
+    @classmethod
+    def _stringish(cls, v: Any) -> str | None:
+        # Older content scripts could send an element (serialised as {}) when a form field is
+        # named "id"/"action"; never let page markup crash the snapshot.
+        return v if isinstance(v, str) else None
+
 
 class PageSignals(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -58,6 +65,7 @@ class PageSignals(BaseModel):
     has_password_field: bool = False
     has_email_or_username_field: bool = False
     has_captcha: bool = False
+    captcha_solved: bool = False  # the user completed the on-page check (its response field is filled)
     has_otp_field: bool = False
     login_cta_present: bool = False
     logout_cta_present: bool = False

@@ -36,6 +36,33 @@ def test_legal_questions_require_approved_fact(sample_profile) -> None:
     assert by[1].status == "needs_input" and by[1].legally_significant
 
 
+def test_work_authorization_and_sponsorship_are_answered_per_country(sample_profile) -> None:
+    profile = {**sample_profile, "legal": {"work_authorized_countries": ["India"], "requires_sponsorship": "Yes", "work_authorization": "Yes"}}
+    nodes = [
+        node(0, "Are you legally authorized to work in the United States?", "select", "combobox", options=["Yes", "No"], required=True),
+        node(1, "Are you legally authorized to work in India?", "select", "combobox", options=["Yes", "No"], required=True),
+        node(2, "Will you now or in the future require visa sponsorship from Esri for employment (e.g., H-1B visa)?", "select", "combobox", options=["Yes", "No"], required=True),
+        node(3, "Will you require sponsorship to work in India?", "select", "combobox", options=["Yes", "No"], required=True),
+        node(4, "Are you authorized to work in the country where this job is located?", "select", "combobox", options=["Yes", "No"], required=True),
+    ]
+    by = {f.node: f for f in make_plan(nodes, profile).fields}
+    assert (by[0].value, by[0].status) == ("No", "auto")
+    assert (by[1].value, by[1].status) == ("Yes", "auto")
+    assert (by[2].value, by[2].status) == ("Yes", "auto")  # H-1B implies the US: outside India -> needs sponsorship
+    assert (by[3].value, by[3].status) == ("No", "auto")
+    assert by[4].status == "needs_input"  # no country in the question and no job location given
+    p = CandidateProfile.model_validate(profile)
+    with_loc = build_fill_plan([nodes[4]], p.facts(), [], None, resumes=[], default_resume_id=None, submit_names=["Submit"], job_location="Bengaluru, India")
+    assert with_loc.fields[0].value == "Yes"
+
+
+def test_approved_answer_for_one_country_never_answers_another(sample_profile) -> None:
+    answers = [{"id": "w1", "category": "legal", "question": "Are you legally authorized to work in India?", "answer": "Yes", "provenance": "approved_answer", "legally_significant": True}]
+    nodes = [node(0, "Are you legally authorized to work in the United States?", "select", "combobox", options=["Yes", "No"], required=True)]
+    plan = make_plan(nodes, {**sample_profile, "legal": {}}, answers)
+    assert plan.fields[0].status == "needs_input" and plan.fields[0].value is None
+
+
 def test_sensitive_optional_question_without_answer_pauses(sample_profile) -> None:
     nodes = [node(0, "What are your salary expectations (EUR)?", required=False)]
     plan = make_plan(nodes, {**sample_profile, "preferences": {}})
@@ -91,6 +118,30 @@ def test_radio_group_planned_once(sample_profile) -> None:
     plan = make_plan(nodes, sample_profile, answers)
     assert plan.fields[0].status == "auto" and plan.fields[0].value == "No"
     assert plan.fields[1].status == "skip"
+
+
+def test_choice_buttons_answer_work_authorization_by_job_country(sample_profile) -> None:
+    profile = {**sample_profile, "legal": {"work_authorized_countries": ["India"], "requires_sponsorship": "Yes"}}
+    q = "Do you have work authorization to work in that country?"
+    nodes = [
+        SnapshotNode(i=5, role="radio", name="Yes", tag="button", type="radio", name_attr="choice:abc", section=q, required=True, checked=False, visible=True),
+        SnapshotNode(i=6, role="radio", name="No", tag="button", type="radio", name_attr="choice:abc", section=q, required=True, checked=False, visible=True),
+    ]
+    p = CandidateProfile.model_validate(profile)
+    plan = build_fill_plan(nodes, p.facts(), [], None, resumes=[], default_resume_id=None, submit_names=["Submit"], job_location="San Francisco, California, United States")
+    f = plan.fields[0]
+    assert (f.status, f.value, f.option_nodes) == ("auto", "No", {"Yes": 5, "No": 6})
+    from app.applications.form_filler import FormFiller
+
+    act = FormFiller.action_for(f)
+    assert act is not None and act.target.strategy == "node" and act.target.value == "6"
+
+
+def test_decline_answer_matches_any_decline_wording(sample_profile) -> None:
+    profile = {**sample_profile, "legal": {"gender": "Decline to self-identify"}}
+    nodes = [node(0, "Gender", "select", "combobox", options=["Male", "Female", "I don't wish to answer"], required=False)]
+    f = make_plan(nodes, profile).fields[0]
+    assert f.value == "I don't wish to answer"
 
 
 def test_submit_and_next_detection(sample_profile) -> None:

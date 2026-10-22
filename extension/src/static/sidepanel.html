@@ -6,7 +6,46 @@
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <h1>Local-First Agent</h1>
+    <div class="titlebar">
+      <h1>Local-First Agent</h1>
+      <button id="infoToggle" class="icon" title="How to use" aria-expanded="false" aria-controls="infoPanel">ⓘ</button>
+    </div>
+
+    <section id="infoPanel" class="card stack info" hidden>
+      <div class="row"><strong>How to use</strong><button id="infoClose" class="icon" title="Close">✕</button></div>
+      <ol class="small steps">
+        <li>Open your Job Hunt list (or any job page) in this tab.</li>
+        <li>Pick a request below (or type your own) and press <b>Run</b>.</li>
+        <li>The agent opens each job in a new tab of this window, fills it from your profile and resume, submits and moves on. A cursor and banner show what it is doing; you can keep using other tabs.</li>
+        <li>Results: <b>Open dashboard</b> (confirmed, waiting, skipped and why).</li>
+      </ol>
+      <div class="small muted">Click a request to put it in the task box:</div>
+      <div class="chips" id="promptChips">
+        <button class="chip" data-prompt="Apply to each job on this list">Apply to each job on this list</button>
+        <button class="chip" data-prompt="Apply to the first 5 jobs on this list">Apply to the first 5 jobs</button>
+        <button class="chip" data-prompt="Dry run: apply to each job on this list">Dry run (fill nothing, just report)</button>
+        <button class="chip" data-prompt="Track my applications on this list">Track my applications</button>
+        <button class="chip" data-prompt="Find contacts for these jobs">Find recruiter contacts</button>
+        <button class="chip" data-prompt="Apply to this job">Apply to this job (single page)</button>
+        <button class="chip" data-prompt="Fill this page">Fill this page (no submit)</button>
+        <button class="chip" data-prompt="Extract this job and score it">Extract &amp; score this job</button>
+      </div>
+      <div class="small muted">Ask anything about the page or PDF you are on (read-only, nothing is clicked):</div>
+      <div class="chips">
+        <button class="chip" data-prompt="Summarise this page in 5 bullet points">Summarise this page</button>
+        <button class="chip" data-prompt="Does this job match my profile? What skills are missing?">Does this job match me?</button>
+        <button class="chip" data-prompt="Write a short cover letter for this job">Write a cover letter</button>
+        <button class="chip" data-prompt="Draft a polite reply to this message">Draft a reply</button>
+        <button class="chip" data-prompt="Explain this in simple words">Explain simply</button>
+      </div>
+      <div class="small"><b>When it stops</b></div>
+      <ul class="small steps">
+        <li><b>Sign-in page</b> (e.g. Workday): the tab stays open; sign in there and the agent continues on its own.</li>
+        <li><b>A question it has no answer for</b>: the field is left empty in that tab. Fill it in yourself and press <b>Resume</b>: the agent continues on that same page and keeps what you typed.</li>
+        <li><b>Pause all</b> stops everything; <b>Resume</b> continues. Already-submitted jobs are never applied to twice.</li>
+      </ul>
+    </section>
+
     <div class="card">
       <div class="row"><span>Local agent</span><span id="conn" class="pill">…</span></div>
       <div class="row"><span>Pairing</span><span id="paired" class="pill">…</span></div>
@@ -57,7 +96,7 @@
 
     <h2>Run a task on this tab</h2>
     <div class="card stack">
-      <textarea id="instruction" placeholder="e.g. Extract this job and score it / Fill this application form with my profile"></textarea>
+      <textarea id="instruction" placeholder="e.g. Apply to each job on this list · Apply to this job · Summarise this page · Write a cover letter for this job"></textarea>
       <div class="row">
         <button id="runTask" class="primary">Run</button>
         <span id="runMsg" class="small muted"></span>

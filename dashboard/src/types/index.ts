@@ -156,6 +156,20 @@ export interface AuditEvent {
   data_json: Record<string, unknown>;
 }
 
+export interface QueueSummary {
+  queued: number;
+  retry_scheduled: number;
+  pending_tasks: number;
+  running_queue_tasks: number;
+  total: number;
+}
+
+export interface ClearQueueResult extends QueueSummary {
+  applications_cancelled: number;
+  tasks_cancelled: number;
+  runs_stopped: number;
+}
+
 export interface Paged<T> {
   items: T[];
   total: number;

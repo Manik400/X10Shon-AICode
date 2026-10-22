@@ -10,10 +10,29 @@ from pydantic import BaseModel, ConfigDict, Field
 class IntentOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    kind: Literal["apply", "apply_list", "extract_job", "navigate", "read", "contacts", "track", "general"]
+    kind: Literal["apply", "apply_list", "extract_job", "navigate", "read", "contacts", "track", "general", "ask", "fill_page"]
     confidence: float = Field(ge=0, le=1)
     url: str | None = None
     notes: str | None = Field(default=None, max_length=300)
+
+
+class AnswerOutput(BaseModel):
+    """Answer to a free-form question about the current page / PDF (read-only assistant mode)."""
+
+    model_config = ConfigDict(extra="allow")
+
+    answer: str = Field(max_length=8000)
+
+    def full_text(self) -> str:
+        """The answer plus anything the model put in other fields (lists of skills, steps…)."""
+        parts = [self.answer.strip()]
+        for key, value in (self.model_extra or {}).items():
+            if isinstance(value, list):
+                items = "\n".join(f"- {v if not isinstance(v, dict) else ', '.join(f'{k}: {x}' for k, x in v.items())}" for v in value)
+                parts.append(f"{key.replace('_', ' ').capitalize()}:\n{items}")
+            elif isinstance(value, str) and value.strip():
+                parts.append(f"{key.replace('_', ' ').capitalize()}: {value.strip()}")
+        return "\n\n".join(p for p in parts if p)
 
 
 class JobExtraction(BaseModel):

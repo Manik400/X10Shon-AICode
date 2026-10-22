@@ -33,7 +33,7 @@ class OllamaProvider(ModelProvider):
             "stream": False,
             "format": request.json_schema,
             "options": options,
-            "keep_alive": "30m",  # keep the model loaded between calls
+            "keep_alive": -1,  # keep the model loaded indefinitely between calls
         }
         t0 = time.perf_counter()
         try:
@@ -59,6 +59,14 @@ class OllamaProvider(ModelProvider):
             output_tokens=data.get("eval_count"),
             raw={k: data.get(k) for k in ("total_duration", "load_duration", "prompt_eval_duration", "eval_duration")},
         )
+
+    async def warm_up(self, model: str) -> bool:
+        """Load the model into (GPU) memory and pin it there; cheap no-op if already loaded."""
+        try:
+            r = await self._client.post("/api/generate", json={"model": model, "prompt": "", "keep_alive": -1}, timeout=httpx.Timeout(10.0, read=300.0))
+            return r.status_code == 200
+        except httpx.HTTPError:
+            return False
 
     async def health(self) -> dict[str, Any]:
         try:

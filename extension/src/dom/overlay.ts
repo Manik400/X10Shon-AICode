@@ -4,6 +4,8 @@
  * snapshot (which skips the host) are unaffected.
  */
 
+import { wait } from './timing';
+
 const HOST_ID = 'lfa-agent-overlay-host';
 const MOVE_MS = 350;
 
@@ -82,13 +84,13 @@ export async function moveCursorTo(el: Element, label?: string): Promise<void> {
   o.ring.style.opacity = '1';
   o.cursor.style.transform = `translate(${x}px,${y}px)`;
   if (label) showBanner(label);
-  await new Promise((res) => setTimeout(res, MOVE_MS + 40));
+  await wait(MOVE_MS + 40);
 }
 
 export async function clickPulse(): Promise<void> {
   const o = ensure();
   if (!o) return;
   o.cursor.classList.add('click');
-  await new Promise((res) => setTimeout(res, 120));
+  await wait(120);
   o.cursor.classList.remove('click');
 }

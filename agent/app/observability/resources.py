@@ -22,10 +22,14 @@ class ResourceSnapshot:
 
 
 class ResourceMonitor:
-    def __init__(self, max_ram_mb: int):
+    def __init__(self, max_ram_mb: int, *, memory_pressure_percent: int = 92, min_available_mb: int = 1536):
         self._proc = psutil.Process(os.getpid())
         self._proc.cpu_percent(None)
         self.max_ram_mb = max_ram_mb
+        # The machine counts as under pressure above this percentage, unless plenty of memory is
+        # still available in absolute terms (a 32 GB box at 94% still has ~2 GB free).
+        self.memory_pressure_percent = memory_pressure_percent
+        self.min_available_mb = min_available_mb
 
     def snapshot(self) -> ResourceSnapshot:
         vm = psutil.virtual_memory()
@@ -46,6 +50,6 @@ class ResourceMonitor:
         s = self.snapshot()
         if s.process_rss_mb > self.max_ram_mb:
             return True, f"process RSS {s.process_rss_mb:.0f} MB exceeds budget {self.max_ram_mb} MB"
-        if s.system_memory_percent > 92:
-            return True, f"system memory at {s.system_memory_percent:.0f}%"
+        if s.system_memory_percent > self.memory_pressure_percent and s.system_available_mb < self.min_available_mb:
+            return True, f"system memory at {s.system_memory_percent:.0f}% ({s.system_available_mb:.0f} MB free)"
         return False, ""

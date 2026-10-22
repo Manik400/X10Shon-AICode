@@ -30,7 +30,7 @@ from .observability.audit import AuditLogger
 from .observability.resources import ResourceMonitor
 from .persistence.db import Database
 from .persistence.unit import Repositories
-from .scheduler import Scheduler
+from .scheduler import Scheduler, SchedulerConfig
 from .security.pairing import PairingService
 
 log = logging.getLogger("lfa.state")
@@ -85,6 +85,16 @@ class AppContext:
             return self.extension_driver
         return self.playwright_driver
 
+    def browser_ready(self) -> tuple[bool, str]:
+        """Whether a scheduled (tab-less) task could open a page right now. Checked before the
+        scheduler creates work, so tasks are not started only to die on a missing browser."""
+        if self.hub.connected:
+            return True, ""
+        free = self.playwright_driver.free_pages()
+        if free <= 0:
+            return False, f"extension not connected and all {self.playwright_driver._max_pages} Playwright pages are in use"
+        return True, ""
+
 
 async def build_context(settings: Settings, *, db_path: Path | str | None = None) -> AppContext:
     from .core.util import now_iso
@@ -118,7 +128,7 @@ async def build_context(settings: Settings, *, db_path: Path | str | None = None
     planner = TaskPlanner(gateway, ContextBuilder(settings.model_context_chars // 2))
     intents = IntentRouter(gateway)
     recovery = RecoveryManager(settings.max_recovery_attempts)
-    resources = ResourceMonitor(settings.max_ram_mb)
+    resources = ResourceMonitor(settings.max_ram_mb, memory_pressure_percent=settings.memory_pressure_percent, min_available_mb=settings.memory_min_available_mb)
     pairing = PairingService(repos.pairings, settings.pairing_code_ttl_seconds)
 
     ctx_holder: dict[str, AppContext] = {}
@@ -151,6 +161,16 @@ async def build_context(settings: Settings, *, db_path: Path | str | None = None
         started_at=now_iso(),
     )
     ctx_holder["ctx"] = ctx
+
+    def _apply_limits(cfg: SchedulerConfig) -> None:
+        # One source of truth for "how many at once" and "how often to retry": the saved scheduler
+        # settings, applied at start-up and whenever they change (not only until the next restart).
+        tasks.set_concurrency(cfg.max_concurrent_tasks)
+        recovery.set_max_retries(cfg.max_retries)
+        settings.max_concurrent_tasks = cfg.max_concurrent_tasks
+
+    scheduler.on_config(_apply_limits)
+    scheduler.browser_ready = ctx.browser_ready
     await scheduler.load()
     # Apply persisted model roles and settings to the gateway/policy.
     if scheduler.config.model_roles:
@@ -174,6 +194,7 @@ async def build_context(settings: Settings, *, db_path: Path | str | None = None
         await hub.push("status_update", {"status": {"paused_all": policy.paused, "current_task": tasks.current(), "pending_approvals": len(pending), "waiting_user": waiting}})
 
     tasks.on_change(push_status)
+    scheduler._warm = gateway.warm_up
     scheduler.on_config(lambda cfg: setattr(workflow, "_submit_policy", cfg.approval_policy))
     workflow._submit_policy = scheduler.config.approval_policy
 

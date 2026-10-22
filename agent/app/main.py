@@ -42,6 +42,10 @@ def create_app(settings: Settings | None = None, *, db_path: Path | str | None =
         ext_ids = await ctx.repos.pairings.active_extension_ids()
         app.state.allowed_origins = trusted_dashboard_origins(settings) | {extension_origin(e) for e in ext_ids}
         ctx.scheduler.start()
+        try:
+            await ctx.tasks.rearm_watchers()
+        except Exception:  # noqa: BLE001 - never block startup on this
+            log.exception("could not re-arm verification watchers")
         await ctx.audit.log("service.started", host=settings.host, port=settings.port)
         log.info("LFA agent listening on %s", settings.origin)
         try:

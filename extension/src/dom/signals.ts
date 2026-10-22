@@ -42,6 +42,13 @@ const ERROR_SELECTORS = [
   '[id*="error" i]:not(input):not(script)',
   '.alert-danger',
   '.alert-error',
+  // Greenhouse's new job boards, Lever, Workable: "helper-text--error", "…__error", "has-error".
+  '[class*="--error" i]:not(input):not(select):not(textarea)',
+  '[class*="__error" i]:not(input):not(select):not(textarea)',
+  '[class*="error-text" i]',
+  '[class*="errorText" i]',
+  '[class*="validation" i][class*="error" i]',
+  '.has-error .help-block',
 ];
 const SUCCESS_SELECTORS = ['[role="status"]', '.alert-success', '.success', '[class*="confirmation" i]', '[id*="confirmation" i]', '[class*="thank" i]'];
 
@@ -58,11 +65,67 @@ function visibleText(el: Element): string {
   return normalizeText(he.innerText || he.textContent);
 }
 
+/**
+ * A CAPTCHA that needs a person: a visible checkbox/challenge widget. Invisible / score-based
+ * reCAPTCHA (the "protected by reCAPTCHA" badge, size=invisible) needs no human action and
+ * does not stop the agent; if a site escalates to a visible challenge, that is detected here.
+ */
+export function hasBlockingCaptcha(doc: Document): boolean {
+  const invisible = (el: Element): boolean => {
+    const src = el.getAttribute('src') || '';
+    if (/[?&]size=invisible/i.test(src)) return true;
+    if ((el.getAttribute('data-size') || '').toLowerCase() === 'invisible') return true;
+    if (el.closest('.grecaptcha-badge')) return true;
+    return false;
+  };
+  for (const sel of CAPTCHA_SELECTORS) {
+    let els: Element[] = [];
+    try {
+      els = Array.from(doc.querySelectorAll(sel));
+    } catch {
+      continue; // invalid selector in exotic documents
+    }
+    for (const el of els) {
+      if (invisible(el)) continue;
+      if (el.tagName === 'IFRAME') {
+        // Challenge popups (bframe) and checkbox widgets are visible and at least ~60x60. reCAPTCHA
+        // pre-injects its bframe inside a visibility:hidden container parked at top:-10000px, so
+        // a merely present iframe is not a challenge.
+        if (onScreen(el, 60, 60)) return true;
+        continue;
+      }
+      const frames = Array.from(el.querySelectorAll('iframe'));
+      if (frames.length && frames.some((f) => !invisible(f) && onScreen(f, 60, 60))) return true;
+      if (!frames.length && onScreen(el, 60, 30) && /^(captcha|g-recaptcha|h-captcha|cf-turnstile)$/i.test(el.id || el.className.toString().split(' ')[0] || '')) return true;
+    }
+  }
+  return false;
+}
+
+/** Visible to a person: laid out, not hidden by an ancestor's visibility/opacity, and on the page. */
+function onScreen(el: Element, minW: number, minH: number): boolean {
+  if (!isShown(el)) return false;
+  const r = el.getBoundingClientRect();
+  if (r.width < minW || r.height < minH) return false;
+  const win = el.ownerDocument.defaultView;
+  const scrollX = win?.scrollX ?? 0;
+  const scrollY = win?.scrollY ?? 0;
+  if (r.bottom + scrollY <= 0 || r.right + scrollX <= 0) return false; // parked off the page
+  for (let n: Element | null = el; n; n = n.parentElement) {
+    const cs = win?.getComputedStyle(n);
+    if (!cs) break;
+    if (cs.visibility === 'hidden' || cs.visibility === 'collapse' || cs.display === 'none') return false;
+    if (parseFloat(cs.opacity || '1') < 0.05) return false;
+  }
+  return true;
+}
+
 export function collectSignals(doc: Document, bodyText: string): PageSignals {
   const signals: PageSignals = {
     has_password_field: false,
     has_email_or_username_field: false,
     has_captcha: false,
+    captcha_solved: false,
     has_otp_field: false,
     login_cta_present: false,
     logout_cta_present: false,
@@ -94,17 +157,7 @@ export function collectSignals(doc: Document, bodyText: string): PageSignals {
     if (short) signals.has_otp_field = true;
   }
 
-  for (const sel of CAPTCHA_SELECTORS) {
-    try {
-      const el = doc.querySelector(sel);
-      if (el && (isShown(el) || el.tagName === 'IFRAME')) {
-        signals.has_captcha = true;
-        break;
-      }
-    } catch {
-      /* invalid selector in exotic documents */
-    }
-  }
+  signals.has_captcha = hasBlockingCaptcha(doc);
 
   const ctas = Array.from(doc.querySelectorAll('a,button,input[type="submit"],input[type="button"],[role="button"]'));
   for (const c of ctas) {
@@ -206,5 +259,8 @@ export function collectSignals(doc: Document, bodyText: string): PageSignals {
       break;
     }
   }
+  // A verification the user already completed: the widget's hidden response field is filled.
+  // (Read only; the agent never fills it.)
+  signals.captcha_solved = Array.from(doc.querySelectorAll<HTMLTextAreaElement | HTMLInputElement>('textarea.g-recaptcha-response,textarea[name="g-recaptcha-response"],[name="h-captcha-response"],[name="cf-turnstile-response"]')).some((el) => (el.value || '').trim().length > 0);
   return signals;
 }

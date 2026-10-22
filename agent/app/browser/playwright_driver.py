@@ -97,7 +97,7 @@ class PlaywrightDriver(BrowserDriver):
             out.append(TabInfo(tab_id=tid, url=page.url, title=await page.title()))
         return out
 
-    async def open_tab(self, url: str, *, active: bool = True) -> str:
+    async def open_tab(self, url: str, *, active: bool = True, opener_tab_id: str | None = None, home_url: str | None = None) -> str:
         await self.start()
         live = [t for t, p in self._pages.items() if not p.is_closed()]
         if len(live) >= self._max_pages:
@@ -109,6 +109,11 @@ class PlaywrightDriver(BrowserDriver):
         if url:
             await self._goto(page, url, self._nav_timeout)
         return tid
+
+    def free_pages(self) -> int:
+        """How many more pages may be opened right now (the scheduler asks before starting work)."""
+        live = [p for p in self._pages.values() if not p.is_closed()]
+        return max(0, self._max_pages - len(live))
 
     async def close_tab(self, tab_id: str) -> None:
         page = self._pages.pop(tab_id, None)

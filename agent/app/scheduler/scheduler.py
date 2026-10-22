@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
 from ..core.enums import ApplicationState
 from ..core.util import now_dt, now_iso
@@ -24,7 +25,7 @@ log = logging.getLogger("lfa.scheduler")
 class SchedulerConfig(BaseModel):
     enabled: bool = False
     daily_application_limit: int = 20
-    max_concurrent_tasks: int = 1
+    max_concurrent_tasks: int = Field(default=1, ge=1, le=5, description="Browser tasks the scheduler may run at once (tasks the user starts on their own tab never wait behind them)")
     per_domain_concurrency: int = 1
     per_domain_delay_seconds: float = 5.0
     allowed_domains: list[str] = Field(default_factory=lambda: ["*"], description="'*' allows every http(s) site; list specific domains to restrict")
@@ -32,7 +33,7 @@ class SchedulerConfig(BaseModel):
     active_hours_start: int = Field(default=8, ge=0, le=23)
     active_hours_end: int = Field(default=22, ge=1, le=24)
     active_days: list[int] = Field(default_factory=lambda: [0, 1, 2, 3, 4], description="0=Monday")
-    max_retries: int = 3
+    max_retries: int = Field(default=1, ge=0, le=3, description="Automatic re-attempts after a transient failure (browser hiccup, rate limit, site down); 0 = a failure is final. A job that fails for its own reasons is never retried automatically.")
     retry_base_seconds: float = 60.0
     approval_policy: str = "always"  # always | never | per_site
     auto_pause_on_resource_pressure: bool = True
@@ -41,6 +42,18 @@ class SchedulerConfig(BaseModel):
     cpu_threads: int = 0
     gpu_enabled: bool = False
     model_roles: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+    @field_validator("max_concurrent_tasks", "max_retries", mode="before")
+    @classmethod
+    def _clamp_limits(cls, v: Any, info: ValidationInfo) -> Any:
+        """Settings saved before these bounds existed (e.g. 100 concurrent tasks, 10 retries, which
+        made every failing job come back again and again) load clamped instead of failing."""
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return v
+        lo, hi = (1, 5) if info.field_name == "max_concurrent_tasks" else (0, 3)
+        return min(hi, max(lo, n))
 
 
 class Scheduler:
@@ -52,11 +65,18 @@ class Scheduler:
         self._resources = resources
         self._config = SchedulerConfig()
         self._config_listeners: list[Any] = []
+        self._warm: Any = None  # async callable that loads the configured models
         self._wake = asyncio.Event()
         self._stop = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
         self.last_tick: str | None = None
         self.last_reason: str = "not started"
+        # Answers "could a task open a page right now?" (extension connected / Playwright capacity).
+        self.browser_ready: Callable[[], tuple[bool, str]] | None = None
+        self._hold_until = 0.0
+        self._hold_reason = ""
+        if hasattr(task_manager, "browser_unavailable_cb"):
+            task_manager.browser_unavailable_cb = self.hold
 
     @property
     def config(self) -> SchedulerConfig:
@@ -115,6 +135,14 @@ class Scheduler:
     def kick(self) -> None:
         self._wake.set()
 
+    def hold(self, reason: str, seconds: float = 300.0) -> None:
+        """Stop starting tasks for a while: no browser could take the last one (extension offline,
+        page limit). Without this every tick re-created the same tasks, each dying at once and each
+        counted against its job as a failed attempt."""
+        self._hold_until = max(self._hold_until, time.monotonic() + seconds)
+        self._hold_reason = reason[:160]
+        log.info("scheduler on hold for %ds: %s", int(seconds), self._hold_reason)
+
     def within_active_hours(self, now: datetime | None = None) -> bool:
         now = now or datetime.now()
         if now.weekday() not in self._config.active_days:
@@ -122,7 +150,20 @@ class Scheduler:
         return self._config.active_hours_start <= now.hour < self._config.active_hours_end
 
     async def _loop(self) -> None:
+        import time as _time
+
+        last_warm = 0.0
         while not self._stop.is_set():
+            # Keep the local model loaded: right after start-up, then every 10 minutes, which also
+            # reloads it after a reboot or sleep if the runtime dropped it.
+            if self._warm is not None and _time.monotonic() - last_warm > 600:
+                last_warm = _time.monotonic()
+                try:
+                    loaded = await self._warm()
+                    if loaded:
+                        log.info("model warm-up: %s", loaded)
+                except Exception:
+                    log.debug("model warm-up failed", exc_info=True)
             try:
                 await self.tick()
                 await self._repos.db.checkpoint()  # keep the main db file current (see Database.checkpoint)
@@ -146,6 +187,14 @@ class Scheduler:
         if not self.within_active_hours():
             self.last_reason = "outside active hours"
             return {"started": 0, "reason": self.last_reason}
+        if time.monotonic() < self._hold_until:
+            self.last_reason = f"waiting for a browser ({self._hold_reason}); next try in {int(self._hold_until - time.monotonic())}s"
+            return {"started": 0, "reason": self.last_reason}
+        if self.browser_ready is not None:
+            ready, why = self.browser_ready()
+            if not ready:
+                self.last_reason = f"waiting for a browser: {why}"
+                return {"started": 0, "reason": self.last_reason}
         if self._resources is not None and cfg.auto_pause_on_resource_pressure:
             pressured, why = self._resources.under_pressure()
             if pressured:

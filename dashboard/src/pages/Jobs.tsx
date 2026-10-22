@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { ApiError, api, download, post, put, qs } from '../api/client';
 import { useGet } from '../hooks/useApi';
-import { ALL_STATES, type Job, type Paged } from '../types';
+import { ALL_STATES, type ClearQueueResult, type Job, type Paged, type QueueSummary } from '../types';
 import { Empty, ErrorBox, Pagination, SortHeader, StatePill, fmtDate, fmtScore } from '../components/ui';
 
 interface Filters {
@@ -39,6 +39,7 @@ export default function Jobs() {
   const path = `/api/jobs${qs({ limit: LIMIT, offset, search, state, since: since ? new Date(since).toISOString() : '', sort, order })}`;
   const jobs = useGet<Paged<Job>>(path, [], 5000);
   const filters = useGet<Filters>('/api/jobs/filters');
+  const queueInfo = useGet<QueueSummary>('/api/applications/queue', [], 5000);
 
   function onSort(f: string) {
     if (sort === f) setOrder(order === 'asc' ? 'desc' : 'asc');
@@ -88,6 +89,26 @@ export default function Jobs() {
     }
   }
 
+  async function emptyQueue() {
+    const q = queueInfo.data;
+    const waiting = q ? q.queued + q.retry_scheduled + q.pending_tasks : 0;
+    const runs = q ? q.running_queue_tasks : 0;
+    const what = [waiting ? `${waiting} waiting application(s) will be cancelled` : '', runs ? `${runs} running list pass(es) will be stopped` : ''].filter(Boolean).join(' and ');
+    if (!window.confirm(`Empty the queue? ${what}. Applications already sent are not touched, and the jobs stay in this list.`)) return;
+    setBusy(true);
+    setMsg(null);
+    try {
+      const r = await post<ClearQueueResult>('/api/applications/queue/clear', { stop_running: true });
+      setMsg(`Queue emptied: ${r.applications_cancelled} application(s) cancelled, ${r.tasks_cancelled} waiting task(s) cancelled, ${r.runs_stopped} list pass(es) stopped.`);
+      await queueInfo.reload();
+      await jobs.reload();
+    } catch (e) {
+      setMsg(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function saveFilters(f: Filters) {
     const r = await put<{ rescreened: number }>('/api/jobs/filters', f);
     setMsg(`Filters saved; ${r.rescreened} jobs re-screened.`);
@@ -110,7 +131,15 @@ export default function Jobs() {
           </label>
           <button onClick={() => void download('/api/jobs/export.csv', 'jobs.csv')}>Export CSV</button>
           <button onClick={() => setShowFilters(!showFilters)}>{showFilters ? 'Hide filters' : 'Match filters'}</button>
+          <button className="danger" onClick={() => void emptyQueue()} disabled={busy || !queueInfo.data || queueInfo.data.total === 0} title="Cancel every queued application and stop running list passes. Nothing already sent is touched.">
+            Empty queue{queueInfo.data ? ` (${queueInfo.data.total})` : ''}
+          </button>
         </div>
+        {queueInfo.data && queueInfo.data.total > 0 && (
+          <p className="small muted">
+            In the queue: {queueInfo.data.queued} queued · {queueInfo.data.retry_scheduled} waiting for a retry · {queueInfo.data.pending_tasks} task(s) waiting their turn · {queueInfo.data.running_queue_tasks} running
+          </p>
+        )}
         {msg && <div className="notice">{msg}</div>}
       </div>
       {showFilters && filters.data && <FilterEditor initial={filters.data} onSave={saveFilters} />}

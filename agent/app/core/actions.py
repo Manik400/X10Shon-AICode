@@ -28,6 +28,7 @@ ActionType = Literal[
     "done",
     "ask_user",
     "banner",
+    "read_options",  # open a dropdown, list its options, close it (changes nothing)
 ]
 
 LocatorStrategy = Literal["role", "label", "testid", "id", "name", "text", "css", "node"]
@@ -43,7 +44,7 @@ VerificationStrategy = Literal[
 ]
 
 # Actions that never change page state and are always low risk.
-READ_ONLY_ACTIONS: frozenset[str] = frozenset({"wait", "extract", "snapshot", "done", "ask_user", "scroll", "banner"})
+READ_ONLY_ACTIONS: frozenset[str] = frozenset({"wait", "extract", "snapshot", "done", "ask_user", "scroll", "banner", "read_options"})
 
 
 class Target(BaseModel):
@@ -74,7 +75,7 @@ class BrowserAction(BaseModel):
 
     @model_validator(mode="after")
     def _check_shape(self) -> "BrowserAction":
-        needs_target = {"click", "type", "select", "check", "upload"}
+        needs_target = {"click", "type", "select", "check", "upload", "read_options"}
         if self.type in needs_target and self.target is None:
             raise ValueError(f"action '{self.type}' requires a target")
         if self.type == "navigate":

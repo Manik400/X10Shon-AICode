@@ -187,6 +187,11 @@ export function isVisible(el: Element): boolean {
   // File inputs are almost always hidden behind a styled label; they stay actionable as long as
   // they are in the document and not explicitly display:none via a disabled ancestor.
   if (el instanceof HTMLInputElement && el.type === 'file') return el.isConnected && getComputedStyle(el).display !== 'none' || !!el.labels?.length;
+  // Styled radios/checkboxes hide the real input (opacity 0, off-screen, display:none) behind a
+  // visible label; clicking the input still works, so the label's visibility decides.
+  if (el instanceof HTMLInputElement && (el.type === 'radio' || el.type === 'checkbox') && el.labels?.length) {
+    if (Array.from(el.labels).some((l) => l !== el && isVisible(l))) return true;
+  }
   const style = getComputedStyle(el);
   if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return false;
   if (parseFloat(style.opacity || '1') === 0) return false;
@@ -231,15 +236,22 @@ export function sectionContext(el: Element): string {
   if (dialog) return 'dialog';
   // Walk backwards for the nearest heading in document order.
   let node: Element | null = el;
-  while (node) {
+  let hops = 0;
+  while (node && hops < 40) {
+    hops += 1;
     let sib = node.previousElementSibling;
     while (sib) {
       if (/^H[1-6]$/.test(sib.tagName)) return textOf(sib).slice(0, 80);
       const inner = sib.querySelector('h1,h2,h3,h4,h5,h6');
       if (inner && !sib.querySelector('input,select,textarea')) return textOf(inner).slice(0, 80);
+      // Web-component forms (SmartRecruiters) title a block with a plain short text node
+      // ("Resume", "Education") rather than a heading element.
+      const plain = textOf(sib);
+      if (plain && plain.length <= 40 && /^[A-Z]/.test(plain) && !sib.querySelector('input,select,textarea,button,a') && !sib.shadowRoot) return plain.slice(0, 80);
       sib = sib.previousElementSibling;
     }
-    node = node.parentElement;
+    // Keep climbing through shadow boundaries: the block's title usually sits in the host's tree.
+    node = node.parentElement || ((node.getRootNode() as ShadowRoot).host ?? null);
     if (node && (node.tagName === 'BODY' || node.tagName === 'HTML')) break;
   }
   return '';

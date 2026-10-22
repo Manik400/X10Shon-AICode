@@ -39,6 +39,29 @@ class NotesBody(BaseModel):
     notes: str = Field(max_length=4000)
 
 
+class ClearQueueBody(BaseModel):
+    stop_running: bool = Field(default=True, description="Also stop running list passes and scheduled applications (tasks on the user's own tab are never touched)")
+
+
+@router.get("/queue")
+async def queue(ctx: Ctx, _: Auth) -> dict:
+    """What is waiting to be applied to: queued / retry-scheduled applications, tasks waiting their
+    turn and running queue work."""
+    from ..scheduler.queue import queue_summary
+
+    return await queue_summary(ctx.repos)
+
+
+@router.post("/queue/clear")
+async def clear_queue(body: ClearQueueBody | None, ctx: Ctx, _: Auth) -> dict:
+    """Empty the queue (dashboard button): cancel every queued application and waiting task."""
+    from ..scheduler.queue import clear_queue as _clear
+    from ..scheduler.queue import queue_summary
+
+    result = await _clear(ctx.repos, ctx.tasks, ctx.audit, stop_running=body.stop_running if body else True)
+    return {**result, **(await queue_summary(ctx.repos))}
+
+
 @router.get("")
 async def list_applications(ctx: Ctx, _: Auth, limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0), state: str | None = None, search: str | None = None, since: str | None = None, verification: str | None = None, sort: str = "updated_at", order: str = "desc") -> dict:
     items, total = await ctx.repos.applications.list(Page(limit, offset), state=state, search=search, since=since, verification=verification, sort=sort, order=order)

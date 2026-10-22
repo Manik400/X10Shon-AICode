@@ -17,7 +17,8 @@ export type ActionType =
   | 'snapshot'
   | 'done'
   | 'ask_user'
-  | 'banner';
+  | 'banner'
+  | 'read_options';
 
 export type LocatorStrategy = 'role' | 'label' | 'testid' | 'id' | 'name' | 'text' | 'css' | 'node';
 
@@ -104,6 +105,7 @@ export interface PageSignals {
   has_password_field: boolean;
   has_email_or_username_field: boolean;
   has_captcha: boolean;
+  captcha_solved?: boolean;
   has_otp_field: boolean;
   login_cta_present: boolean;
   logout_cta_present: boolean;

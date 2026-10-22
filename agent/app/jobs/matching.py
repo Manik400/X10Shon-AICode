@@ -102,6 +102,27 @@ def apply_filters(job: dict[str, Any], f: JobFilters) -> FilterResult:
     return res
 
 
+US_ONLY_RE = re.compile(r"only (be )?(able to )?hir(e|ing) (with)?in the (u\.?s\.?|united states)|(must|need to) (be|reside|live) (based |located )?in the (u\.?s\.?|united states)|(u\.?s\.?|us)[- ]based (candidates )?only|open (only )?to (candidates )?(in|based in) the (u\.?s\.?|united states) only", re.I)
+_CLEARANCE_RE = re.compile(r"\bts\s*/\s*sci\b|top[- ]secret|(active|current|secret|government|security)[- ]clearance|clearance (is )?required|polygraph|u\.?s\.? citizenship (is )?required|must be a u\.?s\.? citizen|requires? u\.?s\.? citizenship", re.I)
+
+
+def eligibility_blockers(job: dict[str, Any], profile: dict[str, Any]) -> list[str]:
+    """Hard requirements the candidate cannot meet, from the posting and the profile's verified
+    work rights. Unlike preference filters these stop list-apply too: applying cannot succeed.
+
+    Only a US security clearance / US-citizenship requirement is checked, and only when the
+    profile lists work-authorized countries that exclude the United States."""
+    countries = [str(c).strip().lower() for c in ((profile.get("legal") or {}).get("work_authorized_countries") or []) if str(c).strip()]
+    if not countries or any(c in ("united states", "usa", "us", "u.s.") for c in countries):
+        return []
+    text = " ".join(str(job.get(k) or "") for k in ("title", "company", "description")) + " " + " ".join(job.get("requirements") or [])
+    m = _CLEARANCE_RE.search(text)
+    if m:
+        return [f"requires a US security clearance / US citizenship (\"{m.group(0)}\"); your work rights: {', '.join(countries)}"]
+    m = US_ONLY_RE.search(text)
+    return [f"hires only people already in the US (\"{m.group(0)}\"); your work rights: {', '.join(countries)}"] if m else []
+
+
 def deterministic_score(job: dict[str, Any], profile: dict[str, Any], f: JobFilters) -> tuple[float, dict[str, Any]]:
     """Weighted keyword scoring with evidence. Range 0..1."""
     text = ((job.get("description") or "") + " " + " ".join(job.get("requirements") or [])).lower()

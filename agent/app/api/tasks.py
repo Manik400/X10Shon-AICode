@@ -7,7 +7,14 @@ from ..core.enums import ApplicationState
 from ..persistence.repositories import Page
 from .deps import Auth, Ctx
 
+import re
+
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
+
+# "this job / this role / here": the user means the posting in front of them, not a list.
+# Addresses that are always ONE posting, however many "similar jobs" links they show.
+_SINGLE_POSTING_URL = re.compile(r"linkedin\.com/jobs/view/\d+|naukri\.com/job-listings-|indeed\.[a-z.]+/viewjob|glassdoor\.[a-z.]+/job-listing/|wellfound\.com/jobs/\d+|/jobs?/\d{5,}|greenhouse\.io/[^/]+/jobs/\d+|lever\.co/[^/]+/[0-9a-f-]{20,}|ashbyhq\.com/[^/]+/[0-9a-f-]{20,}", re.I)
+_THIS_JOB_RE =re.compile(r"\b(this|that|the) (job|role|position|posting|opening|vacancy)\b|\bapply (here|now)\b|\bthis page\b", re.I)
 
 
 class TaskBody(BaseModel):
@@ -26,18 +33,23 @@ async def create_task(body: TaskBody, ctx: Ctx, _: Auth) -> dict:
     kind = intent.kind
     application_id = body.application_id
     home = (ctx.scheduler.config.home_list_url or "").strip()
-    if home and kind in ("apply", "apply_list", "extract_job", "navigate", "general"):
-        start_url = body.url or ""
-        if not start_url.startswith(home):
-            raise HTTPException(400, f"Job Hunt mode: start applications from your list at {home}. Track and contacts work on any page.")
-        if kind == "apply":
-            kind = "apply_list"  # on the list, "apply" always means: work through the jobs on it
+    if home and kind == "apply" and (body.url or "").startswith(home.split("#")[0]):
+        kind = "apply_list"  # on the Job Hunt list, "apply" means: work through the jobs on it
+    # Anywhere else: "apply to this job" applies on that page; job lists on other sites work too.
     if body.tab_id is not None:
         busy = [t for t in await ctx.repos.tasks.running() if t.get("tab_id") == body.tab_id and t["status"] in ("pending", "running", "waiting_approval")]
         if busy:
             raise HTTPException(409, f"a {busy[0]['kind']} task is already running on this tab; wait for it or cancel it")
+    if kind in ("apply", "apply_list") and body.url:
+        from urllib.parse import urlsplit as _split
+
+        from ..applications.workflow import _NOT_JOB_HOSTS as _not_job
+
+        _host = _split(body.url).netloc.lower().split(":")[0]
+        if _not_job.search(_host):
+            raise HTTPException(400, f"{_host} is not a job page. Open a job posting or a list of jobs, then try again.")
     tab_snap = None
-    if kind == "apply" and body.tab_id is not None and ctx.hub.connected:
+    if kind in ("apply", "apply_list") and body.tab_id is not None and ctx.hub.connected:
         try:
             tab_snap = await ctx.extension_driver.snapshot(str(body.tab_id), max_nodes=ctx.settings.snapshot_max_nodes)
         except Exception as exc:
@@ -45,7 +57,7 @@ async def create_task(body: TaskBody, ctx: Ctx, _: Auth) -> dict:
     if tab_snap is not None:
         from urllib.parse import urlsplit
 
-        from ..applications.workflow import _NOT_JOB_HOSTS
+        from ..applications.workflow import _NOT_JOB_HOSTS, _form_is_application
         from ..browser.page_state import classify_page
         from ..jobs.listing import extract_job_links
 
@@ -53,8 +65,16 @@ async def create_task(body: TaskBody, ctx: Ctx, _: Auth) -> dict:
         if _NOT_JOB_HOSTS.search(host) or (urlsplit(tab_snap.url).port == 8765 and "/fixtures/" not in tab_snap.url):
             raise HTTPException(400, f"{host or 'this page'} is not a job page. Open a job posting or a list of jobs, then try again.")
         cls = classify_page(tab_snap)
-        if len(extract_job_links(tab_snap)) >= 3 and cls.kind != "form":
+        # "Apply to this job" on a posting stays a single application even when the posting shows
+        # "similar jobs" links. Only a page that is itself a list (no single posting, or the user
+        # asked for all of them) becomes a list run.
+        singular = bool(_THIS_JOB_RE.search(body.instruction or ""))
+        is_posting = cls.kind in ("job_description", "form") or tab_snap.signals.has_jsonld_jobposting or bool(_SINGLE_POSTING_URL.search(tab_snap.url))
+        n_links = len(extract_job_links(tab_snap))
+        if kind == "apply" and n_links >= 3 and not is_posting and not singular:
             kind = "apply_list"  # a page full of job links: apply to each of them
+        elif kind == "apply_list" and n_links < 3 and (_form_is_application(tab_snap) or _SINGLE_POSTING_URL.search(tab_snap.url)):
+            kind = "apply"  # "apply to each job" on a single posting / its form: that one job
     if kind == "apply" and application_id is None and body.url:
         # Importing the page as a job first gives the workflow a persisted application record.
         # From a Chrome tab the tab's own snapshot is used (works on authenticated pages);
@@ -71,6 +91,12 @@ async def create_task(body: TaskBody, ctx: Ctx, _: Auth) -> dict:
             app = await ctx.repos.applications.transition(app["id"], ApplicationState.QUEUED, reason="queued from task", actor="user")
         application_id = app["id"]
     domain = intent.url or body.url
+    if application_id is not None and not domain:
+        # Re-running a known application (dashboard "Apply"/"Resume"): its own URL is the task's page.
+        known = await ctx.repos.applications.get(application_id)
+        if known is None:
+            raise HTTPException(404, "unknown application")
+        domain = known.get("application_url") or None
     task = await ctx.repos.tasks.create(kind, instruction=body.instruction, application_id=application_id, tab_id=body.tab_id, domain=domain)
     if domain and domain.startswith("http"):
         from urllib.parse import urlsplit

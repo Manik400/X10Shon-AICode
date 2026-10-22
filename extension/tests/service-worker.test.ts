@@ -25,7 +25,7 @@ function makeChrome() {
       sendMessage: vi.fn(async () => undefined),
       lastError: undefined as undefined | { message: string },
     },
-    alarms: { create: vi.fn(async () => undefined), clear: vi.fn(async () => undefined), onAlarm: { addListener: () => undefined } },
+    alarms: { create: vi.fn(async () => undefined), get: vi.fn(async () => undefined), clear: vi.fn(async () => undefined), onAlarm: { addListener: () => undefined } },
     permissions: {
       contains: vi.fn(async ({ origins }: { origins: string[] }) => origins.every((o) => granted.has(o))),
       request: vi.fn(async ({ origins }: { origins: string[] }) => {

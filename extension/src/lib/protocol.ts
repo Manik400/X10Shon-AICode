@@ -5,9 +5,12 @@ import type { ActionPayload, ActionResult, BrowserAction, PageSnapshot } from '.
 export type AgentRequest =
   | { type: 'ping' }
   | { type: 'list_tabs'; id: string }
-  | { type: 'open_tab'; id: string; url: string; active?: boolean }
+  | { type: 'open_tab'; id: string; url: string; active?: boolean; opener_tab_id?: number; home_url?: string }
+  | { type: 'protect_tab'; id: string; tab_id: number }
+  | { type: 'capabilities'; id: string }
   | { type: 'activate_tab'; id: string; tab_id: number }
   | { type: 'reload_extension'; reason?: string }
+  | { type: 'notify'; title: string; message: string; tab_id?: number | null; key?: string }
   | { type: 'close_tab'; id: string; tab_id: number }
   | { type: 'navigate'; id: string; tab_id: number; url: string; timeout_ms: number }
   | { type: 'snapshot'; id: string; tab_id: number; max_nodes?: number }
@@ -29,6 +32,7 @@ export type ExtensionReply =
   | { type: 'tab_opened'; id: string; ok: boolean; tab_id?: number; error?: string }
   | { type: 'tab_closed'; id: string; ok: boolean }
   | { type: 'tab_activated'; id: string; ok: boolean; error?: string }
+  | { type: 'capabilities_result'; id: string; features: string[]; version: string }
   | { type: 'navigate_result'; id: string; result: ActionResult }
   | { type: 'snapshot_result'; id: string; ok: boolean; snapshot?: PageSnapshot; error?: string }
   | { type: 'action_result'; id: string; result: ActionResult }

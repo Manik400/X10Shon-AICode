@@ -197,7 +197,219 @@ passed.
 - Tests: agent 123 passed (new `tests/test_apply_list.py`, end-to-end list apply over fixtures:
   2 applied, 1 correctly failed), extension 21 passed.
 
+## 2026-10-19 — first real ATS run (Ashby) fixes
+- **False CAPTCHA** (`signals.ts` `hasBlockingCaptcha`): reCAPTCHA pre-injects its challenge
+  `bframe` inside a `visibility:hidden` container at `top:-10000px`; it counted as a visible
+  challenge. Widgets now must be on screen (no hidden/transparent ancestor, ≥60×60, on the page).
+- **Re-rendered fields** (`snapshot.ts` fingerprints, `locator.ts` `refind`): React forms swap
+  inputs after hydration/autofill, leaving `strategy:"node"` targets disconnected. Each snapshot
+  node keeps a fingerprint (id, tag, role, accessible name, name attr, type, nth); a disconnected
+  node is re-found by it, never guessed.
+- **Yes/No answer buttons** (`dom/choice.ts`): Ashby renders questions as a label plus Yes/No
+  buttons. These are reported as a radio group (section = question, `name_attr` = `choice:<hash>`,
+  checked from aria/`_active_` class), planned per country like any legal question, and clicked by
+  exact option node (`FieldPlan.option_nodes`). Rows like "Open"/"Apply" are never choices.
+- **Wrong submit button**: snapshots taken while filling renumber the page; the saved submit index
+  hit "Replace" (resume upload). Submit/next are now re-resolved on a fresh snapshot
+  (`find_submit_and_next`) right before clicking.
+- Profile legal answers set by the user: work rights India; sponsorship needed elsewhere; willing
+  to relocate; EEO "Decline to self-identify" (matched to any decline wording by `_choose_option`).
+- Per-country answers carry confidence 0.95 (derived from verified facts).
+
+## 2026-10-19 (later) — searchable dropdowns, strict matching, unattended reliability
+- **Dropdowns** (`actions.ts`): `read_options` opens a searchable dropdown read-only so plans use
+  real options (salary ranges/amounts, multi-select languages, EEO wording). `select` types the
+  answer first, picks an option that BEGINS with it (never one that merely contains it: "India"
+  once picked "British Indian Ocean Territory"; a recycled option element once gave "North
+  Korea"), and returns what the dropdown DISPLAYS; the agent verifies that strictly
+  (`values_match`), so a wrong pick fails the field and blocks submission.
+- **Background tabs** (`dom/timing.ts`): pauses use MessageChannel in hidden tabs (setTimeout is
+  throttled to 1/s, then 1/min); cursor animation skipped when hidden; a frozen tab is brought to
+  the front and the action/snapshot retried once.
+- **Submission safety**: confirmation polled for ~12 s; "Thanks for your application" and status
+  notices recognised; an uncertain submission is never retried automatically (tab left open).
+- **Eligibility**: TS/SCI, US-citizen-only and "hire only within the U.S." roles are skipped when
+  the user has no US work rights (posting text or form question).
+- **Answers** (profile): per-currency salary (+ conversion from USD), referral source/fallback,
+  marketing opt-in, why-join / reason-for-leaving texts, residence (Yes only for India), work
+  arrangements, graduation from education dates, citizenship, languages (fluent only when asked),
+  relatives / non-compete / criminal / veteran / disability / gender, privacy-notice consent,
+  experience topics, addresses, alternate phone, national phone number where the form takes the
+  country code separately.
+- **Runner**: per-job action budget 150; approval wait time no longer counts against the job
+  deadline; stale IN_PROGRESS states from cancelled runs are retried; memory pressure waits up to
+  2 min instead of failing; private loopback Ollama (127.0.0.1:11435) supervised by the agent.
+- Result on the Job Hunt list: 7 confirmed (6 Clera, 1 Granola), 6 ineligible skipped, 3 closed
+  postings, 2 uncertain (Trivago, Granola Full Stack: check email), Minitab waiting on US-only
+  questions.
+
 ## Next implementation step
 Install a local runtime (e.g. Ollama with a 1.5–3B instruct model), set the `extractor`,
 `field_mapper` and `matcher` roles to it in Settings, run `POST /api/settings/models/evaluate`
 and the benchmark with `--with-model`, and record the model figures in `PERFORMANCE.md`.
+
+## 2026-10-21 — Shared Ollama, styled radios, thank-you alerts
+
+- Memory: the agent now uses the Ollama desktop server (127.0.0.1:11434) instead of a private copy on 11435, so qwen2.5:7b is loaded once (RAM 93% → 87%). `LFA_OLLAMA_AUTOSTART=false`.
+- Extension 0.2.13: radios/checkboxes hidden with `opacity: 0` (or similar) behind a visible `<label>` are now in the snapshot. Comeet's required "previously worked for…" question was invisible to the agent, which caused a rejected submit.
+- Opt-in rule also matches "keep my data … contact me about job opportunities".
+- Verifier: a thank-you message rendered in an alert/status box is no longer counted as a site error (Comeet showed "Your application has been submitted" in an alert).
+- Cognyte (NI Pune Backend Engineer Junior) submitted and reconciled as confirmed.
+
+## 2026-10-21 (later) — 59-job run analysis: Workday, BambooHR, SmartRecruiters
+
+Of 59 jobs, 50 failed; the causes were three sites, not fifty problems:
+
+- **Workday (~33 jobs)** — the job page is a single-page app that draws its Apply button seconds
+  after the URL loads; the agent snapshotted at ~3 s, saw nothing and gave up. The workflow now
+  waits for the page to settle (`_settled_snapshot`: re-reads until a form/Apply appears or the
+  node count stops changing, ≤12 s) before deciding. Workday's "Apply Manually" then lands on a
+  Create Account page; after settling, sign-in walls are re-checked so the job ends as
+  AUTH_REQUIRED with a notification (accounts are never created by the agent).
+- **BambooHR (15 jobs)** — the whole site was down ("BambooHR temporarily unavailable", later a bare
+  `{"error_msg":"404 Route Not Found"}`). `_site_down` recognises outage pages and raises a
+  retryable NavigationError → RETRY_SCHEDULED instead of a permanent failure.
+- **SmartRecruiters (4 jobs)** — three widget problems in its Lit web components: the resume box
+  clears its `<input type=file>` after reading the file (upload now counts as attached when the page
+  shows the file name), the country-code list lives in shadow DOM with slotted option text (option
+  lookup is now shadow-DOM aware, uses the list's own search box, and `pressOn` sends composed
+  PointerEvents), and uploading a resume to the "autofill" box redraws the form (the fill loop now
+  re-reads the page and fills what is still empty once before asking the user; attached files are
+  not re-uploaded).
+- Extension 0.2.14. Field rules: "Preferred First Name" → first name; "Acknowledge" counts as the
+  agree option of a privacy-notice dropdown; "keep my data / contact me about opportunities" follows
+  the marketing opt-in.
+- Memory guard: `LFA_MEMORY_PRESSURE_PERCENT` / `LFA_MEMORY_MIN_AVAILABLE_MB` (96 % / 1.5 GB here):
+  this PC sits at 88-95 % because the desktop Ollama keeps qwen2.5:7b pinned (keep-alive ∞) for
+  other tools, plus Chrome. `POST /api/tasks` with `application_id` and no URL now takes the
+  application's own URL as the task domain.
+- Follow-up (same day): a CAPTCHA sitting on an application form (BambooHR) no longer stops the
+  job before anything is filled — the page counts as a form, every field is filled, and right
+  before submitting the job pauses as AUTH_REQUIRED ("complete the verification, then Resume");
+  Resume submits (the hand-off is remembered in `fill_plan.captcha_handoff`). The agent never
+  solves or bypasses the check itself. Dropdown search boxes ("Search by country/region or code")
+  are skipped by the planner; "School location" maps to the new `education[].location`; values a
+  site already holds (resume-parsed "GGSIP University") are kept when equivalent to the profile's
+  rather than cleared and re-typed; a type-ahead that offers no suggestion at all keeps the typed
+  text. Extension 0.2.15 follows slotted options (`<slot>` assigned nodes) when reading lists.
+- Extension 0.2.16: job tabs open in the agent's own window — next to the list tab that started
+  the run, else the window the side panel / the previous job tab was in — never in whichever
+  Chrome window has focus, and bringing a frozen tab forward no longer focuses its window. The user
+  can keep working in a second Chrome window while a list runs.
+- Extension 0.2.17: the side panel is scoped per tab (`sidePanel.setOptions`): off by default, on
+  for the tab the toolbar icon was clicked on and for every tab the agent opens for its work; tabs
+  the user opens by hand never show it. Events the agent fires are `composed`, so inputs inside web
+  components are heard by their host (SmartRecruiters upload box); option lists are resolved once
+  per selection and found by walking the enclosing shadow trees instead of the whole page (a
+  whole-page search through ~1800 shadow roots per poll was timing selections out).
+
+## 2026-10-22 — speed, duplicate entries, hand-finished applications
+
+Timing of a SmartRecruiters fill (25 actions, 170 s): ~50 s opening every dropdown to read its
+options, ~50 s in two model calls for the fill plan (one per pass), 7-20 s per custom-dropdown
+pick, 0.45 s per typed field. Changes:
+- Type-ahead pickers the rules answer with a plain value (city, country, school, employer,
+  country code) are no longer opened to read their options; typing the value is the selection.
+- Model field mappings are cached per task by label: the redraw/refill pass and later wizard steps
+  cost no second model call.
+- One education entry and one job: when the form already lists an entry ("Edit education …",
+  "Edit experience …" from the resume autofill), that section's blank fields are left alone.
+- A paused application (NEEDS_USER_INPUT / AUTH_REQUIRED / READY_FOR_REVIEW) can be reconciled as
+  APPLIED_CONFIRMED when the user finished it by hand, so no run reopens it.
+- Profile: website/portfolio = https://manik400.github.io/portfolio/.
+- Extension 0.2.18: the agent's window is remembered in local storage (session storage was wiped
+  by every reload, after which the first job landed in the focused window and dragged all later
+  ones there). When nothing is remembered, the window holding the job-list tab is used (the agent
+  passes `home_url`; API/dashboard tasks open next to that tab), and failing that a new unfocused
+  window is created — the user's current window is never borrowed.
+- Verification boxes (BambooHR's visible reCAPTCHA): the form is filled, ONE desktop notification
+  covers every waiting job (replaced in place with a count), and a read-only watcher polls the
+  paused tab; the moment the user has ticked the box (the widget's response field is filled) the
+  task resumes and submits by itself — no Resume click. The agent never ticks or bypasses a check.
+- "Apply to each job" works the list on the page the user is on (a saved report, any site); the
+  Job Hunt default list is only a fallback when that page holds no jobs. The navigator also
+  follows "Open" / "View job" / "Details" controls on the way to the real Apply (8 steps max).
+- Fill rules: "Country/Region" is the country (it used to match the state rule via "region");
+  Indian cities/states (Mohali, Chandigarh, Punjab, Haryana, Kolkata, Jaipur, …) count as India for
+  salary currency and per-country answers; when neither the question nor the job's place names a
+  currency, the candidate's own country's currency is used (INR here), never USD by default;
+  "as soon as possible" start dates become the nearest Monday in the field's date format.
+  Side panel: the guide's ✕ works again (`[hidden]` now wins over the `.stack` flex rule).
+- Extension 0.2.20: a select whose action carries no timeout no longer gets a NaN budget (one
+  poll); the option poll always has 3-6 s. The resume is planned into the form's Resume field,
+  never the "autofill from your resume" drop box (which parses the file and redraws the whole
+  form); an upload counts as taken when the box re-renders after receiving the file. Replica
+  tests of SmartRecruiters' upload box and country-code picker (shadow DOM, slotted options,
+  pointer-only opening) now drive the real action code in tests/webcomponents.test.ts.
+- On startup the agent re-arms the verification watchers for every task still waiting on a tab
+  (they are asyncio tasks and die with the process), so a tick given after a restart still submits.
+- Standing answers (2026-10-22): preferred work location = the job's own place when offered, else
+  Bengaluru > Hyderabad > Gurugram > "Any"; notice period = immediate, else the shortest band;
+  experience = the band holding the real figure; qualification options Graduate / UG / Bachelor's
+  are equivalents of B.Tech; "associated with <company> before" → previously-employed answer (No);
+  "connected with associates/employees" → relatives answer (No); approved answers added for
+  "offer in hand" (Yes). Chrome's Memory Saver discarded filled tabs waiting for the user (the
+  form reloads blank): tabs handed to the user are now set `autoDiscardable: false`
+  (extension 0.2.22, `protect_tab`), and the verification watcher survives a briefly
+  unresponsive tab instead of giving up.
+- Standing answers batch 2: preferred/family name = Goyal (rule), current CTC 9 LPA
+  (`preferences.current_salary`, band picker understands a shared "LPA"/"k"/"L" unit, case-
+  insensitive), declarations ("I hereby declare…", "I have read and agree…") agreed automatically
+  like privacy notices, former employee / currently employed with <company> → No, nationality →
+  Indian; approved answers for graduation year/type, right-to-work verification after offer (Yes).
+- SmartRecruiters root causes from the in-page trace: the picked option's own textContent is empty
+  (slotted) so the pick reported "" → now read through `optionText`; the resume went into the
+  "autofill" box because section titles across shadow roots were invisible → `sectionContext`
+  now climbs through shadow hosts and accepts a short plain-text block title ("Resume").
+- Standing answers batch 3 (approved answers): contract role Yes, managed a team Yes, WFH night
+  shift Yes, join in a week Yes, big-enterprise B2B Yes, start-up Yes, US/global clients No,
+  marketing-automation features "Workflows, scheduling and dashboards", current/desired annual
+  salary in local currency 900000 / 1800000. Referral: "Company careers website", else LinkedIn.
+  "Date available to join" follows the nearest-Monday rule. "Why us / what motivates you" boxes are
+  now written per job by the local model from the posting (title, company, description) and the
+  candidate's background (`FormFiller._compose_open_answers`, cached per task); the stored stance
+  is the fallback when no model is configured.
+- Workday "Start Your Application" page (Capital One): the Apply click tears the page down and
+  Chrome now reports "message channel closed before a response was received" — recognised as a
+  navigation (extension 0.2.24) instead of a failed click; the settle wait allows 20 s and needs
+  four identical readings over 6 s before concluding a page has nothing, since Workday draws its
+  Autofill / Apply Manually links long after its header.
+- Workday application steps (Capital One, signed-in session): "Given Name(s)" / "Family Name" /
+  address fields count as an application; name fields answered from approved answers count as
+  identity; the phone rule no longer catches "Phone Extension" / "Phone Device Type" / country
+  phone code; Workday dropdowns whose placeholder says "Search" are no longer skipped as search
+  boxes when they carry a label; "phone device type" → Mobile (approved answer); redundant
+  preferred/family-name answers removed (the rules cover them).
+- Workday wizard (My Experience, Application Questions): bare "Month"/"Year" boxes of a work or
+  education block are the start pair then the end pair (end left empty for the current job);
+  "I currently work here" → Yes; "Role Description" → the job's description; Workday's listbox
+  state texts ("items selected", "Options Expanded") are not questions; after filling a step the
+  agent presses Escape so an open type-ahead (skills) cannot push "Save and Continue" out of the
+  snapshot; a wizard step reached by Next (or resumed on an open tab) is never judged "not an
+  application" for lacking a name/email; "previously, worked at <company>", "personal or business
+  ties with anyone employed", "basic qualifications", "senior government official" wordings answered.
+- Resync with the user's page: a task started on a tab the user handed over (`WorkflowContext.
+  user_tab`) runs as a resume — no reload, their typed answers kept, continue from the step shown;
+  the progress banner is taken down when a run ends on a tab that stays with the user. After a
+  Next / Save and Continue click the agent waits (≤15 s) until the fields, URL or errors change
+  before reading the page: Workday redraws a step slowly and an early snapshot still showed the
+  completed step, so the agent re-filled it and pressed Save on an untouched questions page.
+- Queue and retries (2026-10-22): the Job queue page has an "Empty queue" button (`GET/POST
+  /api/applications/queue[/clear]`): every QUEUED / RETRY_SCHEDULED application is cancelled,
+  tasks waiting their turn are cancelled and running list passes / scheduled applications stopped;
+  sent applications and tasks on the user's own tab are untouched. Retry storm fixed: a saved
+  config of 100 concurrent tasks and 10 retries made the scheduler start dozens of apply tasks
+  per tick that died at once on the browser page limit, each death counted as a failed attempt
+  and rescheduled; now `max_concurrent_tasks` is 1-5 and `max_retries` 0-3 (default 1; saved
+  values load clamped), the RecoveryManager follows that setting, the scheduler asks
+  `browser_ready()` before creating work and holds for 5 min when a task finds no browser, and a
+  BROWSER_DISCONNECTED failure before the workflow starts no longer counts as the job's attempt.
+  A list pass settles each failed job through the same rule as single applies (one more try only
+  for a transient failure within the limit, otherwise APPLICATION_FAILED) and skips jobs that
+  failed in an earlier pass (note: "failed earlier; use Retry now"), except ones the user paused.
+  Tasks started on the user's own tab (tab_id set) run at once instead of waiting behind the
+  background queue, and the concurrency limit follows the saved setting at start-up and on change.
+  A page where the site says the candidate cannot apply ("You are not eligible for this job",
+  "your profile does not match", "not accepting applications from your location") is closed out
+  as SKIPPED (CANCELLED, with the notice as evidence) before anything is filled and never retried
+  (`page_state.ineligible_notice`; description hypotheticals like "if you do not meet..." ignored).

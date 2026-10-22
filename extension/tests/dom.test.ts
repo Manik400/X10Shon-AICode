@@ -5,7 +5,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildSnapshot, radioGroupLabel } from '../src/dom/snapshot';
 import { locate } from '../src/dom/locator';
-import { executeAction } from '../src/dom/actions';
+import { executeAction, fileNameShown, matchOption, optionText } from '../src/dom/actions';
 import { computeAccessibleName, computeRole, findLabelText } from '../src/dom/accessibility';
 import { collectSignals } from '../src/dom/signals';
 import type { BrowserAction } from '../src/dom/types';
@@ -55,6 +55,35 @@ describe('accessibility', () => {
   });
 });
 
+describe('web-component widgets', () => {
+  it('reads slotted option text and matches it', () => {
+    document.body.innerHTML = `<div id="list" role="listbox"></div>`;
+    const list = document.getElementById('list')!;
+    const mk = (label: string) => {
+      const host = document.createElement('x-option');
+      host.textContent = label;
+      const sr = host.attachShadow({ mode: 'open' });
+      sr.innerHTML = `<div role="option"><slot></slot></div>`;
+      list.appendChild(host);
+      return sr.querySelector('[role="option"]') as Element;
+    };
+    const opts = [mk('British Indian Ocean Territory'), mk('India'), mk('Indonesia')];
+    expect(optionText(opts[1])).toBe('India');
+    expect(matchOption(opts, 'India')).toBe(opts[1]);
+  });
+
+  it('accepts an upload when the page shows the file name after clearing the input', () => {
+    document.body.innerHTML = `<x-dropzone></x-dropzone>`;
+    const host = document.querySelector('x-dropzone')!;
+    const sr = host.attachShadow({ mode: 'open' });
+    sr.innerHTML = `<div class="box"><input type="file"><span class="name"></span></div>`;
+    const input = sr.querySelector('input')!;
+    expect(fileNameShown(input, 'Manik_Goyal_Resume.pdf')).toBe(false);
+    sr.querySelector('.name')!.textContent = 'Manik_Goyal_Resume.pdf';
+    expect(fileNameShown(input, 'Manik_Goyal_Resume.pdf')).toBe(true);
+  });
+});
+
 describe('snapshot', () => {
   it('lists interactive nodes with sections, forms and signals', () => {
     document.body.innerHTML = `
@@ -75,6 +104,18 @@ describe('snapshot', () => {
     expect(snap.nodes.find((n) => n.id === 'p')!.value).toBeUndefined(); // password values never leave the page
   });
 
+  it('keeps styled radios hidden with opacity 0 behind a visible label', () => {
+    document.body.innerHTML = `<fieldset><div><legend>Have you previously worked for us?</legend></div>
+      <ul><li><input type="radio" id="a" name="w" required style="opacity: 0"><label for="a">Yes</label></li>
+      <li><input type="radio" id="b" name="w" required style="opacity: 0"><label for="b">No</label></li></ul></fieldset>
+      <input type="checkbox" id="h" style="opacity: 0">`;
+    const snap = buildSnapshot(document, { maxNodes: 50 });
+    const radios = snap.nodes.filter((n) => n.type === 'radio');
+    expect(radios.map((n) => n.name)).toEqual(['Yes', 'No']);
+    expect(radios[0].section).toBe('Have you previously worked for us?');
+    expect(snap.nodes.find((n) => n.id === 'h')).toBeUndefined(); // no label: really hidden
+  });
+
   it('truncates at maxNodes and reports it', () => {
     document.body.innerHTML = Array.from({ length: 30 }, (_, i) => `<button>b${i}</button>`).join('');
     const snap = buildSnapshot(document, { maxNodes: 10 });
@@ -92,7 +133,13 @@ describe('snapshot', () => {
 
 describe('signals', () => {
   it('detects captcha, otp and recovery pages', () => {
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ width: 304, height: 78, top: 100, left: 0, right: 304, bottom: 178, x: 0, y: 100, toJSON: () => ({}) } as DOMRect);
     document.body.innerHTML = `<div class="g-recaptcha"></div>`;
+    expect(collectSignals(document, '').has_captcha).toBe(true);
+    // reCAPTCHA pre-injects its challenge frame in a hidden container: not a challenge.
+    document.body.innerHTML = `<div style="visibility: hidden; position: absolute; top: -10000px"><iframe src="https://www.google.com/recaptcha/api2/bframe?k=x"></iframe></div>`;
+    expect(collectSignals(document, '').has_captcha).toBe(false);
+    document.body.innerHTML = `<div><iframe src="https://www.google.com/recaptcha/api2/bframe?k=x"></iframe></div>`;
     expect(collectSignals(document, '').has_captcha).toBe(true);
     document.body.innerHTML = `<input autocomplete="one-time-code" maxlength="6">`;
     expect(collectSignals(document, 'Enter the code').has_otp_field).toBe(true);
@@ -140,6 +187,71 @@ describe('locator', () => {
     expect(locate(document, { strategy: 'node', value: String(idx) }).element).not.toBeNull();
     document.body.innerHTML = '';
     expect(locate(document, { strategy: 'node', value: String(idx) }).reason).toMatch(/stale/);
+  });
+
+  it('reports Yes/No answer buttons as a radio group keyed by the question', async () => {
+    document.body.innerHTML = `<div class="field"><label>Do you have work authorization to work in that country? *</label><div class="row"><button type="submit" class="opt">Yes</button><button type="submit" class="opt">No</button></div></div><div><button>Open</button><button>Apply</button></div><button type="submit">Submit Application</button>`;
+    for (const b of Array.from(document.querySelectorAll('button.opt'))) b.addEventListener('click', (e) => { e.preventDefault(); (e.currentTarget as HTMLElement).className = 'opt _active_x1'; });
+    const snap = buildSnapshot(document);
+    const yes = snap.nodes.find((n) => n.name === 'Yes')!;
+    const no = snap.nodes.find((n) => n.name === 'No')!;
+    expect(yes.role).toBe('radio');
+    expect(yes.section).toBe('Do you have work authorization to work in that country?');
+    expect(yes.name_attr).toBe(no.name_attr);
+    expect(yes.required).toBe(true);
+    expect(snap.nodes.find((n) => n.name === 'Open')!.role).toBe('button');
+    expect(snap.nodes.find((n) => n.name === 'Submit Application')!.role).toBe('button');
+    const res = await executeAction(action({ type: 'check', target: { strategy: 'node', value: String(no.i) }, args: { checked: true } }), null);
+    expect(res.ok).toBe(true);
+    expect(res.value).toBe(true);
+  });
+
+  it('finds the hidden file input behind a styled upload box inside a shadow root', async () => {
+    const { findFileInput } = await import('../src/dom/actions');
+    document.body.innerHTML = '<div id="host"></div>';
+    const sr = document.getElementById('host')!.attachShadow({ mode: 'open' });
+    sr.innerHTML = `<div data-testid="m-attachment-input"><div class="rel"><input id="box" placeholder="Select the attachment" readonly></div><button>Browse</button><input type="file" accept=".pdf,.doc" style="display:none"></div>`;
+    const box = sr.getElementById('box')!;
+    expect(findFileInput(box)?.accept).toBe('.pdf,.doc');
+  });
+
+  it('matches dropdown options strictly', async () => {
+    const { matchOption } = await import('../src/dom/actions');
+    const opts = (...t: string[]) => t.map((x) => Object.assign(document.createElement('div'), { textContent: x }));
+    const countries = opts('British Indian Ocean Territory +246', 'India +91', 'Indonesia +62');
+    expect(matchOption(countries, 'India')?.textContent).toBe('India +91');
+    expect(matchOption(opts('British Indian Ocean Territory', 'North Korea'), 'India')).toBeNull();
+    expect(matchOption(opts('None of the above', 'No, thanks'), 'No')?.textContent).toBe('No, thanks');
+    expect(matchOption(opts('Non-binary', 'Male'), 'No')).toBeNull();
+    expect(matchOption(opts('Male', 'I don’t wish to answer'), 'Decline to self-identify')?.textContent).toBe('I don’t wish to answer');
+  });
+
+  it('keeps acting in a background tab without throttled timers', async () => {
+    const { wait } = await import('../src/dom/timing');
+    const hiddenDesc = Object.getOwnPropertyDescriptor(Document.prototype, 'hidden');
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+    const spy = vi.spyOn(window, 'setTimeout');
+    const t0 = Date.now();
+    await wait(30);
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(29);
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+    delete (document as unknown as { hidden?: boolean }).hidden;
+    if (hiddenDesc) Object.defineProperty(Document.prototype, 'hidden', hiddenDesc);
+  });
+
+  it('re-finds a node whose element a framework re-render replaced', () => {
+    const form = `<label>Name<input name="_systemfield_name"></label><label>Email<input type="email" name="_systemfield_email"></label>`;
+    document.body.innerHTML = form;
+    const snap = buildSnapshot(document);
+    const email = snap.nodes.find((n) => n.name === 'Email')!;
+    document.body.innerHTML = form; // same form, brand-new elements
+    const res = locate(document, { strategy: 'node', value: String(email.i) });
+    expect(res.element).toBe(document.querySelector('input[name="_systemfield_email"]'));
+    document.body.innerHTML = `<label>Phone<input name="phone"></label>`;
+    buildSnapshot(document);
+    document.body.innerHTML = `<label>Other<input name="other"></label>`;
+    expect(locate(document, { strategy: 'node', value: '0' }).reason).toMatch(/stale/);
   });
 });
 

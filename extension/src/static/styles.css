@@ -50,3 +50,18 @@ textarea { min-height: 56px; resize: vertical; }
 .notice.ok { border-color: var(--ok); }
 ul { margin: 4px 0; padding-left: 16px; }
 .small { font-size: 11px; }
+
+/* Header with the "How to use" button, and the guide panel. */
+.titlebar { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.titlebar h1 { margin: 0; }
+button.icon { min-width: 28px; height: 28px; padding: 0 6px; border-radius: 14px; font-size: 15px; line-height: 1; }
+.info { border-color: var(--accent); }
+.steps { margin: 0; padding-left: 18px; }
+.steps li { margin: 2px 0; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { border-radius: 14px; padding: 3px 10px; font-size: 12px; border: 1px solid var(--border); background: var(--bg); color: var(--fg); cursor: pointer; }
+.chip:hover { border-color: var(--accent); color: var(--accent); }
+
+/* The hidden attribute must win over layout classes (.stack is display:flex): the guide and other
+   panels close when hidden is set. */
+[hidden] { display: none !important; }

@@ -21,8 +21,34 @@ async function send<T = unknown>(msg: UiRequest): Promise<T> {
 
 let state: State | null = null;
 
+interface TabTask {
+  id: string;
+  kind: string;
+  status: string;
+  tab_id: number | null;
+  action_count: number;
+  progress_json?: { message?: string } | null;
+}
+/** The task belonging to THIS panel's tab (each tab has its own context). */
+let tabTask: TabTask | null = null;
+
+async function loadTabTask(): Promise<void> {
+  if (!state?.tab) {
+    tabTask = null;
+    return;
+  }
+  try {
+    const r = await api<{ items: TabTask[] }>('/api/tasks?limit=25');
+    const mine = r.items.filter((t) => t.tab_id === state!.tab!.id && ['pending', 'running', 'waiting_approval', 'waiting_user'].includes(t.status));
+    tabTask = mine[0] ?? null;
+  } catch {
+    tabTask = null;
+  }
+}
+
 async function refresh(): Promise<void> {
   state = await send<State>({ kind: 'get_state' });
+  if (state.config.paired && state.status.connected) await loadTabTask();
   render();
   if (state.config.paired && state.status.connected) {
     void loadApprovals();
@@ -77,7 +103,11 @@ async function followTask(id: string, target: HTMLElement): Promise<void> {
     }
     const res = t.result_json ?? {};
     const lines: string[] = [];
-    if (typeof res.summary === 'string') lines.push(res.summary);
+    if (typeof res.answer === 'string') {
+      // Assistant mode: the full answer, plus where it came from.
+      lines.push(res.answer);
+      lines.push(`\n— from this ${res.source === 'pdf' ? 'PDF' : 'page'}${res.truncated ? ' (long: only the first part was read)' : ''}`);
+    } else if (typeof res.summary === 'string') lines.push(res.summary);
     if (Array.isArray(res.items)) {
       lines.push(`${res.confirmed ?? 0} applied · ${res.waiting_user ?? 0} need you · ${res.failed ?? 0} failed of ${res.jobs ?? res.items.length}`);
       for (const it of (res.items as { state?: string; url: string; note?: string }[]).slice(0, 30)) {
@@ -116,24 +146,25 @@ function render(): void {
     ($('scoreHere') as HTMLButtonElement).disabled = !allowable || !status.connected;
   }
 
+  // Only this tab's task is shown: other tabs' work never mixes into this panel.
   const agentState = $('agentState');
+  const t = tabTask;
   if (status.pausedAll) pill(agentState, 'paused', 'warn');
-  else if (status.waitingUser) pill(agentState, 'waiting for you', 'warn');
-  else if (status.currentTask) pill(agentState, 'running', 'ok');
-  else pill(agentState, 'idle', '');
+  else if (t?.status === 'waiting_user') pill(agentState, 'waiting for you', 'warn');
+  else if (t) pill(agentState, 'running on this tab', 'ok');
+  else pill(agentState, 'idle on this tab', '');
 
-  const t = status.currentTask;
-  $('taskBox').textContent = t ? `${String(t.kind)} · ${String(t.status)} · step ${String(t.action_count ?? 0)} · ${String(t.message ?? '')}` : 'No task running.';
+  $('taskBox').textContent = t ? `${t.kind.replace('_', ' ')} · ${t.status} · step ${t.action_count ?? 0} · ${t.progress_json?.message ?? ''}` : 'No task on this tab.';
   const w = $('waitingBox');
-  if (status.waitingUser) {
+  if (t?.status === 'waiting_user') {
     w.hidden = false;
     w.innerHTML = '';
     const p = document.createElement('div');
-    p.textContent = String(status.waitingUser.message || 'The agent needs you to act in the browser.');
+    p.textContent = t.progress_json?.message || 'The agent needs you to act on this tab.';
     const b = document.createElement('button');
     b.textContent = 'I have done it – resume';
     b.className = 'primary';
-    b.onclick = () => void resume(String(status.waitingUser?.task_id || ''));
+    b.onclick = () => void resume(t.id);
     w.append(p, b);
   } else {
     w.hidden = true;
@@ -240,16 +271,45 @@ $('resumeAll').onclick = async () => {
   await refresh();
 };
 $('cancelTask').onclick = async () => {
-  const t = state?.status.currentTask;
-  if (!t?.id) return;
-  await api(`/api/tasks/${String(t.id)}/cancel`, { method: 'POST' });
+  if (!tabTask) return;
+  await api(`/api/tasks/${tabTask.id}/cancel`, { method: 'POST' });
   await refresh();
 };
+// Keep this tab's task line current while the panel is visible (lightweight, only when shown).
+setInterval(() => {
+  if (document.visibilityState === 'visible' && state?.status.connected) void loadTabTask().then(render);
+}, 4000);
 $('runTask').onclick = async () => {
   const instruction = ($('instruction') as HTMLTextAreaElement).value.trim();
   if (!instruction || !state?.tab) return;
   await startTask(instruction, $('runMsg'));
 };
+
+// "How to use" guide: toggled by the ⓘ button; opens by itself the first time the panel is used.
+function setInfo(open: boolean): void {
+  $('infoPanel').hidden = !open;
+  $('infoToggle').setAttribute('aria-expanded', String(open));
+  try {
+    localStorage.setItem('lfa.infoSeen', '1');
+  } catch {
+    /* storage unavailable: the guide simply opens again next time */
+  }
+}
+$('infoToggle').onclick = () => setInfo($('infoPanel').hidden);
+$('infoClose').onclick = () => setInfo(false);
+for (const chip of Array.from(document.querySelectorAll<HTMLButtonElement>('#infoPanel .chip'))) {
+  chip.onclick = () => {
+    const box = $('instruction') as HTMLTextAreaElement;
+    box.value = chip.dataset.prompt || chip.textContent || '';
+    box.focus();
+    if (typeof box.scrollIntoView === 'function') box.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  };
+}
+try {
+  if (!localStorage.getItem('lfa.infoSeen')) setInfo(true);
+} catch {
+  /* ignore */
+}
 
 chrome.runtime.onMessage.addListener((msg: { kind?: string }) => {
   if (msg.kind === 'status_changed') void refresh();

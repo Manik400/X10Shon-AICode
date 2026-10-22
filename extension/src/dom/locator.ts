@@ -3,7 +3,33 @@
  * Every strategy returns ranked candidates; ambiguity is reported, never guessed away.
  */
 import { computeAccessibleName, computeRole, findLabelText, isDisabled, isVisible, normalizeText, sectionContext } from './accessibility';
-import { getRegistry } from './snapshot';
+import { fingerprintKey, getRegistry, snapshotCandidates, type NodeFingerprint } from './snapshot';
+
+/**
+ * Re-find a snapshot node whose element was replaced by a re-render (React/Vue forms often swap
+ * inputs right after hydration): same id, else the nth element with the same tag, role,
+ * accessible name, name attribute and type. Returns null unless exactly that field is found.
+ */
+function refind(doc: Document, fp: NodeFingerprint | undefined): Element | null {
+  if (!fp) return null;
+  if (fp.id) {
+    const byId = doc.getElementById(fp.id);
+    if (byId && byId.tagName.toLowerCase() === fp.tag && isVisible(byId)) return byId;
+  }
+  if (!fp.name && !fp.nameAttr) return null; // nothing distinctive to match on
+  const key = fingerprintKey(fp);
+  let n = 0;
+  for (const el of snapshotCandidates(doc)) {
+    if (el.tagName.toLowerCase() !== fp.tag) continue;
+    if ((el.getAttribute('name') || '') !== fp.nameAttr || (el.getAttribute('type') || '').toLowerCase() !== fp.type) continue;
+    const role = computeRole(el);
+    if (!role || !isVisible(el)) continue;
+    if (fingerprintKey({ tag: fp.tag, role, name: computeAccessibleName(el, role), nameAttr: fp.nameAttr, type: fp.type }) !== key) continue;
+    if (n === fp.nth) return el;
+    n += 1;
+  }
+  return null;
+}
 import type { Target } from './types';
 
 export interface Candidate {
@@ -84,7 +110,14 @@ export function locate(doc: Document, target: Target): LocateResult {
     case 'node': {
       const reg = getRegistry();
       const idx = parseInt(target.value, 10);
-      const el = reg.elements[idx];
+      let el: Element | null | undefined = reg.elements[idx];
+      if (el && !el.isConnected) {
+        el = refind(doc, reg.fingerprints[idx]);
+        if (el) {
+          reg.elements[idx] = el;
+          return { element: el, matched: 1, ambiguous: false, reason: 'node index (re-found after re-render)', candidates: [{ el, score: 1, reason: 'node' }] };
+        }
+      }
       if (!el || !el.isConnected) return { element: null, matched: 0, ambiguous: false, reason: 'snapshot node is stale; take a new snapshot', candidates: [] };
       return { element: el, matched: 1, ambiguous: false, reason: 'node index', candidates: [{ el, score: 1, reason: 'node' }] };
     }

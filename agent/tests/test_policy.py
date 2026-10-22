@@ -81,7 +81,7 @@ def test_pause_denies_everything() -> None:
 def test_rate_limit_wait_applies_per_domain() -> None:
     e = PolicyEngine(allowed_domains=["example.com"], per_domain_delay=5)
     e.record_action("https://example.com/a")
-    v = e.evaluate(BrowserAction(type="scroll"), current_url="https://example.com/a")
+    v = e.evaluate(BrowserAction(type="navigate", args={"url": "https://example.com/b"}), current_url="https://example.com/a")
     assert v.decision == "allow" and v.wait_seconds > 0
     assert e.evaluate(BrowserAction(type="scroll"), current_url="https://other.example.com/a").wait_seconds == 0
 

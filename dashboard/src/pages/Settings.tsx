@@ -111,7 +111,8 @@ export default function Settings() {
           Daily application preparation limit <input type="number" value={cfg.daily_application_limit} onChange={(e) => up({ daily_application_limit: Number(e.target.value) })} />
         </label>
         <label>
-          Max concurrent tasks <input type="number" min={1} value={cfg.max_concurrent_tasks} onChange={(e) => up({ max_concurrent_tasks: Number(e.target.value) })} />
+          Max concurrent background tasks (1–5; tasks you start on a tab never wait behind them){' '}
+          <input type="number" min={1} max={5} value={cfg.max_concurrent_tasks} onChange={(e) => up({ max_concurrent_tasks: Math.min(5, Math.max(1, Number(e.target.value))) })} />
         </label>
         <label>
           Per-domain concurrency <input type="number" min={1} value={cfg.per_domain_concurrency} onChange={(e) => up({ per_domain_concurrency: Number(e.target.value) })} />
@@ -134,7 +135,8 @@ export default function Settings() {
           ))}
         </div>
         <label>
-          Max retries <input type="number" value={cfg.max_retries} onChange={(e) => up({ max_retries: Number(e.target.value) })} />
+          Automatic retries after a transient failure (0–3; 0 = a failed job is never retried by itself){' '}
+          <input type="number" min={0} max={3} value={cfg.max_retries} onChange={(e) => up({ max_retries: Math.min(3, Math.max(0, Number(e.target.value))) })} />
         </label>
         <label>
           Submission approval{' '}

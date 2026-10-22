@@ -58,6 +58,10 @@ class Settings(BaseSettings):
 
     # --- model runtime -----------------------------------------------------------------------
     ollama_base_url: str = "http://127.0.0.1:11434"
+    # Start (and restart) a private loopback `ollama serve` for ollama_base_url when it is down.
+    ollama_autostart: bool = False
+    ollama_exe: str | None = None  # default: %LOCALAPPDATA%\Programs\Ollama\ollama.exe
+    ollama_models_dir: str | None = None  # default: ~/.ollama/models
     openai_compatible_base_url: str = "http://127.0.0.1:8080/v1"
     model_request_timeout_seconds: float = 150.0  # CPU inference of a 3B model on ~2k tokens takes 30-90 s
     model_max_concurrency: int = 1
@@ -97,6 +101,8 @@ class Settings(BaseSettings):
     cpu_threads: int = 0  # 0 => runtime default
     gpu_enabled: bool = False
     pause_on_resource_pressure: bool = True
+    memory_pressure_percent: int = 92  # system RAM % above which tasks wait (if under min_available_mb)
+    memory_min_available_mb: int = 1536
 
     # --- logging -----------------------------------------------------------------------------
     log_level: str = "INFO"

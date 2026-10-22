@@ -27,6 +27,32 @@ class HeuristicProvider(ModelProvider):
             out = handler(request.inputs)
         return ModelResponse(text=json.dumps(out), provider=self.name, model=model or "rules", latency_ms=int((time.perf_counter() - t0) * 1000))
 
+    # ------------------------------------------------------------------ navigator (offline fallback)
+    def _task_choose_click(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        items = [str(x).lower() for x in inputs.get("items") or []]
+        for i, name in enumerate(items):
+            if re.match(r"^\s*(apply|easy apply|i'?m interested|continue to (the )?application)", name):
+                return {"index": i, "reason": "apply-style label"}
+        return {"index": None, "reason": "no apply control"}
+
+    def _task_choose_items(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        items = [str(x).lower() for x in inputs.get("items") or []]
+        hits = [i for i, t in enumerate(items) if re.search(r"/jobs?/|/careers?/|/positions?/|/vacanc|/opening|gh_jid=|lever\.co|ashbyhq|greenhouse|workday|smartrecruiters", t)]
+        return {"indices": hits}
+
+    # ------------------------------------------------------------------ assistant (offline fallback)
+    def _task_ask(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        """Extractive answer: the page sentences sharing the most words with the question."""
+        question = (inputs.get("question") or "").lower()
+        text = inputs.get("text") or ""
+        words = {w for w in re.findall(r"[a-z0-9]{4,}", question)}
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+|\n+", text) if len(s.strip()) > 20]
+        if not sentences:
+            return {"answer": "The page has no readable text."}
+        ranked = sorted(sentences, key=lambda s: -len(words & set(re.findall(r"[a-z0-9]{4,}", s.lower()))))
+        best = [s for s in ranked[:4] if words & set(re.findall(r"[a-z0-9]{4,}", s.lower()))] or sentences[:3]
+        return {"answer": " ".join(best)[:1500]}
+
     # ------------------------------------------------------------------ intent
     def _task_intent(self, inputs: dict[str, Any]) -> dict[str, Any]:
         text = (inputs.get("instruction") or "").lower()

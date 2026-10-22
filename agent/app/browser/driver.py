@@ -32,9 +32,17 @@ class BrowserDriver(ABC):
     async def list_tabs(self) -> list[TabInfo]: ...
 
     @abstractmethod
-    async def open_tab(self, url: str, *, active: bool = True) -> str: ...
+    async def open_tab(self, url: str, *, active: bool = True, opener_tab_id: str | None = None, home_url: str | None = None) -> str: ...
+
+    async def capabilities(self) -> set[str]:
+        """Optional transport features (e.g. 'open_in_window'). Default: all in-process."""
+        return {"open_in_window", "activate_tab"}
 
     async def activate_tab(self, tab_id: str) -> None:  # pragma: no cover - default no-op
+        return None
+
+    async def notify(self, title: str, message: str, *, tab_id: str | None = None, key: str | None = None) -> None:  # pragma: no cover - default no-op
+        """Desktop alert for the user (e.g. "sign in to continue"); drivers without one ignore it."""
         return None
 
     @abstractmethod
