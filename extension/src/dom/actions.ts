@@ -199,7 +199,7 @@ function listFor(el: Element): Element | null {
 
 function visibleOptions(el: Element, list?: Element | null): Element[] {
   const scope: ParentNode = (list === undefined ? listFor(el) : list) || el.ownerDocument;
-  return deepQuery(scope, '[role="option"],li[role="menuitem"],[role="listbox"] li').filter((o) => o.getClientRects().length > 0 && o.getAttribute('aria-disabled') !== 'true');
+  return deepQuery(scope, '[role="option"],li[role="menuitem"],[role="menuitemradio"],[role="menuitemcheckbox"],[role="listbox"] li,[data-automation-id="promptOption"],[data-automation-id*="menuItem" i]').filter((o) => o.getClientRects().length > 0 && o.getAttribute('aria-disabled') !== 'true');
 }
 
 /** The search box some dropdowns show inside their open list (SmartRecruiters "Search by

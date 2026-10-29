@@ -49,6 +49,9 @@ const ERROR_SELECTORS = [
   '[class*="errorText" i]',
   '[class*="validation" i][class*="error" i]',
   '.has-error .help-block',
+  // Workday: "errorMessage" / "alertMessage" automation ids on sign-in, sign-up and form steps.
+  '[data-automation-id*="error" i]',
+  '[data-automation-id*="alert" i]',
 ];
 const SUCCESS_SELECTORS = ['[role="status"]', '.alert-success', '.success', '[class*="confirmation" i]', '[id*="confirmation" i]', '[class*="thank" i]'];
 
@@ -138,6 +141,7 @@ export function collectSignals(doc: Document, bodyText: string): PageSignals {
     unsupported_reasons: [],
     iframe_srcs: [],
     has_jsonld_jobposting: false,
+    missing_required: [],
   };
 
   const inputs = Array.from(doc.querySelectorAll('input'));
@@ -199,6 +203,25 @@ export function collectSignals(doc: Document, bodyText: string): PageSignals {
         signals.error_messages.push(msg);
       }
     }
+  }
+  // Required fields still empty: the browser refuses the submit on them silently (no message in
+  // the DOM), which otherwise looks like a click that did nothing.
+  for (const f of Array.from(doc.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>('input,select,textarea'))) {
+    if (signals.missing_required.length >= 15) break;
+    if (f.disabled || !isShown(f)) continue;
+    if (!(f.required || f.getAttribute('aria-required') === 'true')) continue;
+    let empty: boolean;
+    if (f instanceof HTMLInputElement && (f.type === 'checkbox' || f.type === 'radio')) {
+      const group = f.name && f.form ? Array.from(f.form.querySelectorAll<HTMLInputElement>('input')).filter((x) => x.name === f.name) : [f];
+      empty = !group.some((x) => x.checked);
+    } else if (f instanceof HTMLInputElement && f.type === 'file') {
+      empty = !(f.files && f.files.length);
+    } else {
+      empty = !(f.value || '').trim();
+    }
+    if (!empty) continue;
+    const label = normalizeText(f.getAttribute('aria-label') || f.getAttribute('placeholder') || (f.labels && f.labels[0] ? f.labels[0].textContent : '') || f.name || f.id);
+    if (label && !signals.missing_required.includes(label)) signals.missing_required.push(label);
   }
 
   for (const sel of SUCCESS_SELECTORS) {

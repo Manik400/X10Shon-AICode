@@ -18,7 +18,10 @@ from ..core.enums import RiskLevel
 
 Decision = Literal["allow", "deny", "needs_approval"]
 
-_HIGH_RISK_BUTTON = re.compile(r"\b(submit|confirm|pay|purchase|buy|delete|remove|send|withdraw|cancel application|unsubscribe|accept offer|sign|agree)\b", re.I)
+# "sign" means e-signing here; "Sign in" / "Sign up" / "Sign in with email" are ordinary navigation.
+_HIGH_RISK_BUTTON = re.compile(r"\b(submit|confirm|pay|purchase|buy|delete|remove|send|withdraw|cancel application|unsubscribe|accept offer|sign(?![ -]?(in|up|on)\b)|agree)\b", re.I)
+_PASSWORD_BOX = re.compile(r"password|passcode", re.I)
+_NEVER_TYPED = re.compile(r"otp|one.?time|verification code|cvv|card number|ssn|social security|routing|account number", re.I)
 _SENSITIVE_FIELD = re.compile(r"password|passcode|otp|one.?time|verification code|cvv|card number|ssn|social security|routing|account number", re.I)
 
 
@@ -53,6 +56,9 @@ class PolicyEngine:
         self._concurrency = per_domain_concurrency
         self._budgets: dict[str, DomainBudget] = {}
         self.paused = False
+        # A stored site password (profile → site accounts) may be typed into a password box
+        # during automatic sign-in; one-time codes, card numbers and the like still never are.
+        self.allow_stored_credentials = True
 
     # ------------------------------------------------------------------ config
     def set_allowed_domains(self, domains: list[str]) -> None:
@@ -115,6 +121,9 @@ class PolicyEngine:
         elif action.type not in READ_ONLY_ACTIONS and not self.domain_allowed(current_url):
             return PolicyVerdict("deny", risk, f"current page domain not in allow-list: {urlsplit(current_url).netloc}")
         if action.type == "type" and risk == RiskLevel.HIGH:
+            label = field_label or (action.target.name if action.target else "") or ""
+            if action.args.get("credential") is True and self.allow_stored_credentials and _PASSWORD_BOX.search(label) and not _NEVER_TYPED.search(label):
+                return PolicyVerdict("allow", RiskLevel.MEDIUM, "stored site password for automatic sign-in")
             return PolicyVerdict("deny", risk, "typing into credential/secret fields is never automated")
         if risk == RiskLevel.HIGH:
             if explicit_submit and self._submit_policy == "never":

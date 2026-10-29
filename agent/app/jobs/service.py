@@ -38,7 +38,7 @@ class JobService:
         await self._repos.settings.set("job_filters", filters.model_dump())
 
     # ------------------------------------------------------------------ import
-    async def import_url(self, url: str, *, source_kind: str = "url", source_id: str | None = None, extraction: JobExtraction | None = None, prefill: dict[str, Any] | None = None, page_fetcher=None) -> tuple[dict[str, Any], bool]:  # type: ignore[no-untyped-def]
+    async def import_url(self, url: str, *, source_kind: str = "url", source_id: str | None = None, extraction: JobExtraction | None = None, prefill: dict[str, Any] | None = None, page_fetcher=None, screen_with_model: bool = True) -> tuple[dict[str, Any], bool]:  # type: ignore[no-untyped-def]
         """Import one job. Returns (job, is_duplicate). Extraction may be supplied by the caller
         (e.g. from a page snapshot), fetched through an adapter's official API, or, when
         ``page_fetcher`` is given, extracted from a headless snapshot of the public page."""
@@ -94,12 +94,14 @@ class JobService:
             return job, True
 
         await self._audit.log("job.imported", job_id=job["id"], url=canonical, method=data.get("extraction_method"))
-        await self.screen(job["id"])
+        await self.screen(job["id"], use_model=screen_with_model)
         return await self._repos.jobs.get(job["id"]) or job, False
 
-    async def import_from_snapshot(self, snapshot, *, source_kind: str = "manual", task_id: str | None = None) -> tuple[dict[str, Any], bool]:  # type: ignore[no-untyped-def]
+    async def import_from_snapshot(self, snapshot, *, source_kind: str = "manual", task_id: str | None = None, screen_with_model: bool = True) -> tuple[dict[str, Any], bool]:  # type: ignore[no-untyped-def]
+        """``screen_with_model=False`` scores the job by rules only: when the user already asked to
+        apply to it, a 50-120 s model call before anything happens on the page buys nothing."""
         extraction, method = await self._extractor.extract(snapshot, task_id=task_id)
-        job, dup = await self.import_url(snapshot.url, source_kind=source_kind, extraction=extraction, prefill={"extraction_method": method})
+        job, dup = await self.import_url(snapshot.url, source_kind=source_kind, extraction=extraction, prefill={"extraction_method": method}, screen_with_model=screen_with_model)
         return job, dup
 
     async def import_csv(self, content: str, *, source_id: str | None = None) -> dict[str, Any]:

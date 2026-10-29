@@ -78,6 +78,8 @@ class PageSignals(BaseModel):
     unsupported_reasons: list[str] = Field(default_factory=list)
     iframe_srcs: list[str] = Field(default_factory=list)
     has_jsonld_jobposting: bool = False
+    # Visible required fields the browser's own validation would stop a submit on (still empty).
+    missing_required: list[str] = Field(default_factory=list)
 
 
 class PageSnapshot(BaseModel):

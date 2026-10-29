@@ -25,6 +25,33 @@ const INPUT_ROLES: Record<string, string> = {
   hidden: '',
 };
 
+/**
+ * A text box or button that is really a picker: it opens a list of options to choose from
+ * (Workday's "How Did You Hear About Us?" search box and its "Select One" buttons, any
+ * aria-haspopup / aria-autocomplete control). Reported as a combobox so the agent reads its
+ * options and picks one instead of typing an answer into it.
+ */
+function isPicker(el: Element): boolean {
+  const popup = (el.getAttribute('aria-haspopup') || '').toLowerCase();
+  if (popup && popup !== 'false') return true;
+  const auto = (el.getAttribute('aria-autocomplete') || '').toLowerCase();
+  if (auto === 'list' || auto === 'both') return true;
+  if (el.hasAttribute('aria-controls') || el.hasAttribute('aria-owns')) return true;
+  const auto_id = (el.getAttribute('data-automation-id') || '').toLowerCase();
+  if (/searchbox|multiselect|selectinput|prompt|picker|dropdown/.test(auto_id)) return true;
+  const container = el.closest('[data-automation-id*="multiselect" i],[data-automation-id*="selectinput" i],[class*="multiselect" i],[class*="typeahead" i],[class*="autocomplete" i],[class*="select__control" i]');
+  if (container) return true;
+  if (el instanceof HTMLInputElement) {
+    const ph = (el.placeholder || '').trim().toLowerCase();
+    if ((ph === 'search' || ph.startsWith('search ') || ph.startsWith('type to')) && el.autocomplete === 'off') {
+      // Workday: a "Search" box next to a "items selected" list is the picker of a multi-select.
+      const near = el.parentElement?.parentElement;
+      if (near && near.querySelector('[role="listbox"],[data-automation-id="selectedItemList"]')) return true;
+    }
+  }
+  return false;
+}
+
 export function computeRole(el: Element): string {
   const explicit = (el.getAttribute('role') || '').trim().split(/\s+/)[0];
   if (explicit) return explicit.toLowerCase();
@@ -33,9 +60,10 @@ export function computeRole(el: Element): string {
     case 'a':
       return el.hasAttribute('href') ? 'link' : '';
     case 'button':
-      return 'button';
+      return isPicker(el) ? 'combobox' : 'button';
     case 'input': {
       const t = ((el as HTMLInputElement).type || 'text').toLowerCase();
+      if ((t === 'text' || t === 'search') && isPicker(el)) return 'combobox';
       if (t in INPUT_ROLES) return INPUT_ROLES[t];
       if (el.hasAttribute('list')) return 'combobox';
       return 'textbox';

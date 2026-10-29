@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
@@ -32,8 +32,9 @@ from ..jobs.adapters import AdapterRegistry
 from ..jobs.listing import embedded_application_url, unwrap_redirect
 from ..observability.audit import AuditLogger
 from ..persistence.unit import Repositories
-from ..jobs.matching import US_ONLY_RE
+from ..jobs.matching import US_ONLY_RE, location_blocker
 from .field_mapping import find_submit_and_next
+from .signin import SignInHelper, host_of
 
 _EMPTY_VALUE_RE = re.compile(r"^\s*$|^(select|choose|please select|--+|—|none selected)\b.*$", re.I)
 
@@ -67,11 +68,22 @@ def _account_gate(snap: PageSnapshot) -> bool:
     """A popup (or page) asking to log in / sign up before applying, with no application form."""
     if bool(snap.form_fields()) and _form_is_application(snap):
         return False
-    dialog = [n for n in snap.nodes if n.in_dialog and n.visible]
-    pool = dialog or ([] if snap.form_fields() else [])
-    hits = sum(1 for n in pool if n.role in ("button", "link") and _GATE_RE.match((n.name or "").strip()))
     has_password = snap.signals.has_password_field
-    return hits >= 2 or (hits >= 1 and has_password)
+    dialog = [n for n in snap.nodes if n.in_dialog and n.visible]
+    if dialog:
+        hits = sum(1 for n in dialog if n.role in ("button", "link") and _GATE_RE.match((n.name or "").strip()))
+        return hits >= 2 or (hits >= 1 and has_password)
+    # No popup: the page itself is the gate only when it says so (Workday's "Sign In" page with
+    # "Sign in with Google" / "Sign in with email" and no password box yet; a board's "Log in to
+    # apply"), never because a header carries a "Sign in" link beside a job description.
+    hits = sum(1 for n in snap.nodes if n.visible and n.role in ("button", "link") and _GATE_RE.match((n.name or "").strip()))
+    if hits == 0 or (snap.form_fields() and not has_password):
+        return False  # no sign-in control, or some other form (search box, newsletter) is the page
+    if hits >= 1 and has_password:
+        return True
+    from ..browser.page_state import signin_label
+
+    return signin_label(snap.title) or any(n.role == "heading" and n.visible and signin_label(n.text or n.name) for n in snap.nodes)
 
 
 _SEARCH_FIELD_RE = re.compile(r"^(search|find|filter|keyword)s?\b|search (for )?(jobs?|roles?|positions?)|job search|type to search", re.I)
@@ -105,6 +117,11 @@ def _linkedin_external_apply(snap: PageSnapshot) -> str | None:
     return None
 
 
+def linkedin_easy_apply_only(snap: PageSnapshot) -> bool:
+    """A LinkedIn posting whose only way to apply is LinkedIn's own Easy Apply."""
+    return "linkedin.com/jobs" in snap.url and not _linkedin_external_apply(snap) and any(n.role in ("button", "link") and re.match(r"^\s*easy apply\b", n.name or "", re.I) for n in snap.nodes)
+
+
 def location_from_page(snap: PageSnapshot) -> str | None:
     """Country named near the top of a job page (title, headings, first lines), or None."""
     from .profile import countries_in
@@ -114,6 +131,9 @@ def location_from_page(snap: PageSnapshot) -> str | None:
     return sorted(found)[0] if len(found) == 1 else None
 
 
+# Career sites that send a removed posting's link to their search page say so in the address
+# (iCIMS "notFound=1", PageUp "jobnotfound=true").
+_CLOSED_URL_RE = re.compile(r"[?&](notFound=1|jobnotfound=true|job_not_found|expired=(1|true))\b|/(job-expired|job-closed|expired-job)\b", re.I)
 _POSTING_CLOSED_RE =re.compile(r"job (was )?not found|(position|job|role|vacancy|opening)[^.]{0,60}(has been|is|was) (filled|closed)|has been filled|no longer (accepting applications|accepting|available|open)|(job|position|vacancy) (has )?expired|no longer (accepting applications|available|open)|job (posting )?(has )?(expired|closed)|this (job|position|role) (is no longer|has been removed)|page (you requested )?(was )?not found", re.I)
 from .form_filler import FormFiller
 from .profile import CandidateProfile
@@ -210,13 +230,39 @@ def looks_like_application(snap, plan) -> str | None:  # type: ignore[no-untyped
     applicant = (keys & {"contact.phone", "links.linkedin"}) | ({"resume"} if any(f.field_type == "file" and f.resume_id for f in plan.fields) else set())
     # Workday-style wizards ask name + address on step 1 and phone/resume on later steps.
     applicant |= {"address"} if keys & _ADDRESS_KEYS else set()
-    if plan.next_node is not None and re.search(r"/apply", urlsplit(snap.url).path, re.I):
-        return None  # a later step of an application wizard (questions, disclosures): no name here
+    if plan.next_node is not None and (re.search(r"/apply", urlsplit(snap.url).path, re.I) or any(n.in_dialog for n in snap.form_fields())):
+        return None  # a later step of an application wizard (questions, disclosures), or a step of a popup wizard (LinkedIn Easy Apply): no name here
     if not identity:
         return "no name or email field on the form"
     if len(identity) + len(applicant) < 2 and plan.next_node is None:
         return "the form asks for too little to be an application"
     return None
+
+
+_SIGNIN_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _unattended_review(fields: list[Any]) -> None:
+    """Unattended mode (submission policy "never"): nobody reviews, so a review-flagged field is
+    filled with the value it has, verified or inferred, and an optional one without a value is
+    left empty. Only a required field with no value, or a legally significant one with only a
+    guessed value, still pauses the run."""
+    for f in fields:
+        if f.status != "needs_review":
+            continue
+        trusted = f.provenance in (Provenance.VERIFIED_FACT, Provenance.APPROVED_ANSWER)
+        if f.value and (trusted or not f.legally_significant):
+            f.status = "auto"
+            f.reason = (f.reason + "; " if f.reason else "") + "filled unattended"
+        elif not f.required and not f.value:
+            f.status, f.reason = "skip", "optional; left empty (unattended)"
+
+
+def _button_key(n: Any) -> tuple[Any, ...]:
+    """What makes a button "the same one" across two snapshots (indices are renumbered)."""
+    if n is None:
+        return ("", None, "", "")
+    return ((n.name or "").strip().lower(), n.form, (n.type or "").lower(), n.testid or n.id or "")
 
 
 @dataclass(slots=True)
@@ -246,6 +292,10 @@ class ApplicationWorkflow:
         self._adapters = adapters
         self._audit = audit
         self._submit_policy = submit_policy
+        # Unattended mode (scheduler settings): sign in with stored site accounts, create accounts
+        # where a site offers it.
+        self.auto_sign_in = True
+        self.auto_create_accounts = True
 
     async def _probe_dropdowns(self, ctx: WorkflowContext, snap: PageSnapshot, limit: int = 30, *, fact_keys: list[str] | None = None, answers: list[dict[str, Any]] | None = None) -> None:
         """Searchable dropdowns only render options when opened: open each (read-only) to learn its
@@ -315,12 +365,12 @@ class ApplicationWorkflow:
             snap = await ctx.snapshot()
         return snap
 
-    async def _needs_board_account(self, app: dict[str, Any], snap: PageSnapshot) -> None:
+    async def _needs_board_account(self, app: dict[str, Any], snap: PageSnapshot, *, note: str = "") -> None:
         """Boards that only take applications from their own logged-in users (Wellfound, Naukri,
         Indeed, foundit, Instahyre, Himalayas…): hand over to the user instead of failing."""
         host = urlsplit(snap.url).netloc.lower().removeprefix("www.")
-        await self._transition(app["id"], ApplicationState.AUTH_REQUIRED, f"{host} only accepts applications from signed-in users")
-        raise AuthRequiredError(f"{host} needs you signed in to apply. Sign in there in this tab, then press Resume.", details={"url": snap.url})
+        await self._transition(app["id"], ApplicationState.AUTH_REQUIRED, f"{host} only accepts applications from signed-in users{note}")
+        raise AuthRequiredError(f"{host} needs you signed in to apply{note}. Sign in there in this tab, then press Resume.", details={"url": snap.url})
 
     async def _transition(self, app_id: str, state: ApplicationState, reason: str, *, actor: str = "agent", **fields: Any) -> dict[str, Any]:
         # ``actor`` is recorded on the transition, not stored as an application column.
@@ -366,6 +416,46 @@ class ApplicationWorkflow:
             await ctx.execute(BrowserAction(type="navigate", args={"url": target_url}, risk=RiskLevel.LOW, verification="navigation_complete", timeout_ms=30_000), None)
             snap = await ctx.snapshot()
 
+        # Sign-in walls are passed with the profile's stored site accounts (or a new account
+        # where the site offers one): once per host per run, then the run hands over as before.
+        signin = SignInHelper(self._repos, self._audit, create_accounts=self.auto_create_accounts)
+        tried_hosts: set[str] = set()
+        wall_notes: list[str] = []
+
+        async def try_wall(page: PageSnapshot) -> PageSnapshot | None:
+            nonlocal profile
+            host = host_of(page.url)
+            if not self.auto_sign_in or not host or host in tried_hosts:
+                return None
+            tried_hosts.add(host)
+            failures = await self._recent_signin_failures(host)
+            if failures >= 3:
+                # A site that refused the agent three times is not tried a fourth time by itself:
+                # its jobs wait until the account under Profile → Site accounts is fixed.
+                wall_notes.append(f"sign-in on {host} has failed {failures} times; not trying again until its account under Profile → Site accounts is fixed or removed")
+                await self._audit.log("signin.skipped", application_id=app["id"], task_id=ctx.task_id, host=host, failures=failures)
+                return None
+            # One sign-in / sign-up per site at a time: two jobs on the same Workday tenant must
+            # not both create "the" account. The second waits, re-reads the profile and signs in.
+            lock = _SIGNIN_LOCKS.setdefault(host, asyncio.Lock())
+            async with lock:
+                profile = CandidateProfile.model_validate(await self._repos.profile.get() or {})
+                res = await signin.attempt(ctx, page, profile, task_id=ctx.task_id)
+            await self._audit.log("signin.attempt", application_id=app["id"], task_id=ctx.task_id, host=host, status=res.status, note=res.message[:160])
+            if res.status not in ("signed_in", "created"):
+                wall_notes.append(res.message)
+                return None
+            profile = CandidateProfile.model_validate(await self._repos.profile.get() or {})
+            page = res.snap
+            if target_url and not (page.form_fields() or find_apply_button(page)) and not page.url.startswith(target_url.split("?")[0][:60]):
+                # Signed in, but the site went to its home page: back to the job.
+                await ctx.execute(BrowserAction(type="navigate", args={"url": target_url}, risk=RiskLevel.LOW, verification="navigation_complete", timeout_ms=30_000), None)
+                page = await ctx.snapshot()
+            return page
+
+        def wall_note() -> str:
+            return f"; {wall_notes[-1][:140]}" if wall_notes else ""
+
         # 2. Session / challenge detection, then form location (bounded steps).
         clicks_without_effect = 0
         for step in range(self.MAX_STEPS):
@@ -381,9 +471,12 @@ class ApplicationWorkflow:
                     await ctx.execute(BrowserAction(type="navigate", args={"url": external}, risk=RiskLevel.LOW, verification="navigation_complete", timeout_ms=30_000), None)
                     snap = await ctx.snapshot()
                     continue
-                if any(n.role == "button" and re.search(r"easy apply", n.name or "", re.I) for n in snap.nodes):
-                    await self._transition(app["id"], ApplicationState.APPLICATION_FAILED, "LinkedIn Easy Apply is not automated", failure={"category": "SITE_UNSUPPORTED", "message": "LinkedIn Easy Apply"})
-                    raise SiteUnsupportedError("LinkedIn Easy Apply job: not automated (LinkedIn restricts accounts that use automation). Apply on LinkedIn yourself, or via the company's site.")
+                if linkedin_easy_apply_only(snap):
+                    # LinkedIn Easy Apply jobs are left alone: nothing is clicked or filled, the job
+                    # is closed out (never retried) and the tab is closed.
+                    await self._transition(app["id"], ApplicationState.CANCELLED, "LinkedIn Easy Apply job: left alone", evidence={"url": snap.url})
+                    await self._audit.log("application.easy_apply_skipped", application_id=app["id"], task_id=ctx.task_id, url=snap.url)
+                    return {"state": "SKIPPED", "note": "LinkedIn Easy Apply job; left alone"}
             cls = classify_page(snap)
             if cls.kind == "challenge" and "bot-protection check page" in cls.reasons:
                 # Cloudflare-style "Just a moment…" pages usually clear themselves in a normal browser
@@ -398,8 +491,12 @@ class ApplicationWorkflow:
                 await self._transition(app["id"], ApplicationState.AUTH_REQUIRED, "human verification required: " + "; ".join(cls.reasons))
                 raise HumanVerificationError("Complete the verification challenge in the browser, then resume.", details={"url": snap.url})
             if cls.kind == "login":  # a login/recovery/lock page; a header "Sign in" link is not a wall
-                await self._transition(app["id"], ApplicationState.AUTH_REQUIRED, f"authentication required ({cls.auth_state.value})")
-                raise AuthRequiredError(f"Log in on {snap.url} in the browser, then resume.", details={"auth_state": cls.auth_state.value})
+                fixed = await try_wall(snap)
+                if fixed is not None:
+                    snap = fixed
+                    continue
+                await self._transition(app["id"], ApplicationState.AUTH_REQUIRED, f"authentication required ({cls.auth_state.value}){wall_note()}")
+                raise AuthRequiredError(f"Log in on {snap.url} in the browser, then resume{wall_note()}.", details={"auth_state": cls.auth_state.value})
             notice = ineligible_notice(snap)
             if notice:
                 # The site itself says this candidate cannot apply here ("You are not eligible for
@@ -407,6 +504,14 @@ class ApplicationWorkflow:
                 await self._transition(app["id"], ApplicationState.CANCELLED, f"ineligible: the site says \"{notice[:160]}\"", evidence={"url": snap.url, "notice": notice[:300]})
                 await self._audit.log("application.ineligible", application_id=app["id"], task_id=ctx.task_id, url=snap.url, notice=notice[:200])
                 return {"state": "SKIPPED", "note": f"not eligible — the site says: {notice[:140]}"}
+            blocker = location_blocker(" ".join([snap.title or "", snap.text_excerpt or ""]), profile.model_dump())
+            if blocker:
+                # The posting's own facts rule the candidate out by location (Wellfound: on-site
+                # elsewhere with no visa sponsorship / relocation, or "hires remotely in" countries
+                # that exclude theirs): closed out without touching anything; the tab is closed.
+                await self._transition(app["id"], ApplicationState.CANCELLED, f"ineligible: {blocker[:180]}", evidence={"url": snap.url, "notice": blocker[:300]})
+                await self._audit.log("application.ineligible", application_id=app["id"], task_id=ctx.task_id, url=snap.url, notice=blocker[:200])
+                return {"state": "SKIPPED", "note": f"not eligible — {blocker[:140]}"}
             if not (snap.form_fields() and _form_is_application(snap)):
                 embedded = embedded_application_url(snap)
                 if embedded and embedded.split("#")[0] != snap.url.split("#")[0]:
@@ -426,9 +531,17 @@ class ApplicationWorkflow:
                 cls = classify_page(snap)
                 if cls.kind in ("login", "challenge"):
                     continue  # what finished loading is a sign-in wall or a check: handled at the top
+                if len(snap.nodes) < 12 and not snap.form_fields() and find_apply_button(snap) is None and not any(n.role == "heading" and n.visible for n in snap.nodes):
+                    # Still a header-only shell after waiting (Workday under load draws nothing
+                    # else for a long time): tried again later rather than written off.
+                    raise NavigationError("the page did not finish loading (header only after waiting): " + snap.url[:100], details={"url": snap.url})
                 if _account_gate(snap):
-                    await self._transition(app["id"], ApplicationState.AUTH_REQUIRED, "the site asks you to sign in or create an account to apply")
-                    raise AuthRequiredError(f"{urlsplit(snap.url).netloc} needs you to sign in (or sign up) before applying. Do that in this tab, then press Resume.", details={"url": snap.url})
+                    fixed = await try_wall(snap)
+                    if fixed is not None:
+                        snap = fixed
+                        continue
+                    await self._transition(app["id"], ApplicationState.AUTH_REQUIRED, "the site asks you to sign in or create an account to apply" + wall_note())
+                    raise AuthRequiredError(f"{urlsplit(snap.url).netloc} needs you to sign in (or sign up) before applying{wall_note()}. Do that in this tab, then press Resume.", details={"url": snap.url})
             on_application = bool(snap.form_fields()) and _form_is_application(snap)
             apply_node = None if on_application else find_apply_button(snap)
             if apply_node is None and not on_application and _site_down(snap):
@@ -447,16 +560,25 @@ class ApplicationWorkflow:
                 log.info("form reached on %s (application=%s): fields=%s", snap.url[:120], on_application, [(n.role, (n.name or n.placeholder or "")[:30]) for n in _real_form_fields(snap)][:10])
                 break
             # Job description page (a board's search or newsletter box is not the application): click Apply.
-            if apply_node is None and _POSTING_CLOSED_RE.search(" ".join([snap.title, snap.text_excerpt[:1500], *(n.name for n in snap.nodes if n.role == "heading")])):
+            if apply_node is None and (_POSTING_CLOSED_RE.search(" ".join([snap.title, snap.text_excerpt[:1500], *(n.name for n in snap.nodes if n.role == "heading")])) or _CLOSED_URL_RE.search(snap.url)):
                 # Removed/filled posting: nothing to apply to; never retried.
                 await self._transition(app["id"], ApplicationState.CANCELLED, "posting closed or removed by the employer", evidence={"url": snap.url})
                 return {"state": ApplicationState.CANCELLED.value, "note": "posting closed or removed"}
             if apply_node is None and _ACCOUNT_BOARD_RE.search(snap.url):
-                await self._needs_board_account(app, snap)
+                fixed = await try_wall(snap)
+                if fixed is not None:
+                    snap = fixed
+                    continue
+                await self._needs_board_account(app, snap, note=wall_note())
             if apply_node is None:
                 await self._transition(app["id"], ApplicationState.APPLICATION_FAILED, "no application form or apply button found", failure={"category": "SITE_UNSUPPORTED"})
                 raise SiteUnsupportedError("no application form or apply button found on " + snap.url)
-            href = apply_node.href if apply_node.role == "link" else None
+            # A real address on the control is followed as a navigation, whether the control is a
+            # link or an anchor styled as a button (Workday's "Apply" / "Apply Manually"): a click
+            # that unloads the page mid-action, or opens a pop-up Chrome blocks, is avoided that way.
+            href = apply_node.href if apply_node.href and (apply_node.role == "link" or apply_node.tag == "a") else None
+            if href and not href.startswith(("http://", "https://", "javascript:", "#", "mailto:", "tel:")):
+                href = urljoin(snap.url, href)
             same_page = bool(href) and href.split("#")[0] == snap.url.split("#")[0]
             if href and href.startswith(("http://", "https://")) and not same_page:
                 # Follow the Apply link itself: a scripted click that opens a pop-up is blocked by
@@ -476,12 +598,21 @@ class ApplicationWorkflow:
             if _account_gate(snap):
                 # Apply opened the board's own "Log in / Sign up" popup (Wellfound, Himalayas…):
                 # applying there needs the user's account on that site.
-                await self._transition(app["id"], ApplicationState.AUTH_REQUIRED, "the site asks you to sign in or create an account to apply")
-                raise AuthRequiredError(f"{urlsplit(snap.url).netloc} needs you to sign in (or sign up) before applying. Do that in this tab, then press Resume.", details={"url": snap.url})
+                fixed = await try_wall(snap)
+                if fixed is not None:
+                    snap = fixed
+                    continue
+                await self._transition(app["id"], ApplicationState.AUTH_REQUIRED, "the site asks you to sign in or create an account to apply" + wall_note())
+                raise AuthRequiredError(f"{urlsplit(snap.url).netloc} needs you to sign in (or sign up) before applying{wall_note()}. Do that in this tab, then press Resume.", details={"url": snap.url})
             if unchanged:
                 clicks_without_effect += 1
                 if clicks_without_effect >= 2 and _ACCOUNT_BOARD_RE.search(snap.url):
-                    await self._needs_board_account(app, snap)
+                    fixed = await try_wall(snap)
+                    if fixed is not None:
+                        snap = fixed
+                        clicks_without_effect = 0
+                        continue
+                    await self._needs_board_account(app, snap, note=wall_note())
                 if clicks_without_effect >= 2:
                     await self._transition(app["id"], ApplicationState.APPLICATION_FAILED, f"clicking '{apply_node.name[:60]}' does nothing on this page", failure={"category": "SITE_UNSUPPORTED"})
                     raise SiteUnsupportedError(f"Clicking '{apply_node.name[:60]}' does nothing here (the site may need you signed in, or blocks automated clicks).")
@@ -492,131 +623,197 @@ class ApplicationWorkflow:
         # 3. Fill (possibly multi-step), pausing on blocking questions.
         all_reports: list[dict[str, Any]] = []
         plan = None
-        refilled = False
         attached: set[str] = set()  # upload boxes already given a file (a redraw must not repeat them)
-        for step in range(self.MAX_STEPS):
-            await self._probe_dropdowns(ctx, snap, fact_keys=list(profile.facts().keys()), answers=answers)
-            if not job.get("location"):
-                # The job record has no location (some boards hide it from structured data): use
-                # the place named at the top of the page, e.g. "State College, Pennsylvania, United States".
-                job = {**job, "location": location_from_page(snap)}
-            plan = await self._filler.plan(snap, profile, answers, resumes, submit_names=hints["submit_button_names"], task_id=ctx.task_id, job_location=job.get("location"), job=job)
-            if resumed:
-                keep_page_answers(plan)
-            for f in plan.fields:
-                if f.field_type == "file" and f.status == "auto" and f.label in attached:
-                    f.status, f.reason = "skip", "attached in an earlier pass"
-            us_only =next((n.section or n.name for n in snap.nodes if US_ONLY_RE.search(f"{n.name or ''} {n.section or ''}")), None)
-            authorized = [c.strip().lower() for c in profile.legal.work_authorized_countries if c.strip()]
-            if us_only and authorized and not any(c in ("united states", "usa", "us") for c in authorized):
-                # The form itself says only US-based people can be hired: applying cannot succeed.
-                await self._transition(app["id"], ApplicationState.CANCELLED, f"ineligible: hires only in the US (\"{us_only[:120]}\")")
-                return {"state": "SKIPPED", "note": f"hires only in the US: {us_only[:120]}"}
-            if step == 0 and not resumed:
-                # (Not on a resume: a later wizard step — "My Experience", questions — has no name
-                # or email field, and the run already proved the page is an application.)
-                verdict = looks_like_application(snap, plan)
-                if verdict:
-                    # Not a job application (mail, chat, dashboards, search filters…): touch nothing.
-                    await self._transition(app["id"], ApplicationState.APPLICATION_FAILED, f"not an application form: {verdict}", failure={"category": "SITE_UNSUPPORTED", "message": verdict})
-                    raise SiteUnsupportedError(f"This page is not a job application form ({verdict}). Nothing was filled.")
-            if self._submit_policy == "never":
-                # Unattended mode: review-flagged fields that already hold a verified/approved
-                # value are filled; fields without a value still pause.
+        names = hints["submit_button_names"]
+        continued = False  # on a later page reached through Next after a Submit click that went nowhere
+        submitting = False  # SUBMISSION_PENDING recorded (approval given, or not required)
+        verdict = None
+        after = snap
+        for _round in range(3):
+            # One round fills the page in front of it (and the pages behind its Next buttons) up to
+            # a Submit, then submits. When Submit leaves the form exactly as it was and a Next is
+            # there instead, the next round carries on with the following page, as a person would.
+            refilled = False
+            for step in range(self.MAX_STEPS):
+                await self._probe_dropdowns(ctx, snap, fact_keys=list(profile.facts().keys()), answers=answers)
+                if not job.get("location"):
+                    # The job record has no location (some boards hide it from structured data): use
+                    # the place named at the top of the page, e.g. "State College, Pennsylvania, United States".
+                    job = {**job, "location": location_from_page(snap)}
+                plan = await self._filler.plan(snap, profile, answers, resumes, submit_names=names, task_id=ctx.task_id, job_location=job.get("location"), job=job)
+                if resumed:
+                    keep_page_answers(plan)
                 for f in plan.fields:
-                    if f.status == "needs_review" and f.value and f.provenance in (Provenance.VERIFIED_FACT, Provenance.APPROVED_ANSWER):
-                        f.status = "auto"
-            report = await self._filler.fill(None, ctx.tab_id, plan, resolve_payload=ctx.resolve_payload, execute=ctx.execute)  # type: ignore[arg-type]
-            all_reports.append({"step": step, "url": snap.url, **report.to_dict()})
-            attached.update(e["label"] for e in report.filled if str(e.get("message") or "").startswith("file attached"))
-            await self._repos.applications.update_fields(app["id"], {"fill_plan": {"steps": all_reports, "last_plan": plan.to_dict()}})
-            if report.failed and not plan.blocking and step < self.MAX_STEPS - 1 and not refilled:
-                # Filling can re-render the form (SmartRecruiters parses an uploaded resume and
-                # redraws every field; React forms replace nodes): read the live page once more and
-                # fill what is still empty before asking the user.
-                refilled = True
-                await self._audit.log("form.refill", application_id=app["id"], failed=[e["label"] for e in report.failed][:10])
-                await asyncio.sleep(1.5)
+                    if f.field_type == "file" and f.status == "auto" and f.label in attached:
+                        f.status, f.reason = "skip", "attached in an earlier pass"
+                us_only = next((n.section or n.name for n in snap.nodes if US_ONLY_RE.search(f"{n.name or ''} {n.section or ''}")), None)
+                authorized = [c.strip().lower() for c in profile.legal.work_authorized_countries if c.strip()]
+                if us_only and authorized and not any(c in ("united states", "usa", "us") for c in authorized):
+                    # The form itself says only US-based people can be hired: applying cannot succeed.
+                    self._filler.discard_pending(plan)
+                    await self._transition_via(app["id"], ApplicationState.CANCELLED, f"ineligible: hires only in the US (\"{us_only[:120]}\")")
+                    return {"state": "SKIPPED", "note": f"hires only in the US: {us_only[:120]}"}
+                if step == 0 and not resumed and not continued:
+                    # (Not on a resume: a later wizard step — "My Experience", questions — has no name
+                    # or email field, and the run already proved the page is an application.)
+                    verdict_text = looks_like_application(snap, plan)
+                    if verdict_text:
+                        # Not a job application (mail, chat, dashboards, search filters…): touch nothing.
+                        self._filler.discard_pending(plan)
+                        await self._transition_via(app["id"], ApplicationState.APPLICATION_FAILED, f"not an application form: {verdict_text}", failure={"category": "SITE_UNSUPPORTED", "message": verdict_text})
+                        raise SiteUnsupportedError(f"This page is not a job application form ({verdict_text}). Nothing was filled.")
+                if self._submit_policy == "never":
+                    _unattended_review(plan.fields)
+                report = await self._filler.fill(None, ctx.tab_id, plan, resolve_payload=ctx.resolve_payload, execute=ctx.execute)  # type: ignore[arg-type]
+                # The rules filled what they could straight away; the local model's picks for the
+                # rest (it is slow on this machine) are applied now that they have had time to arrive.
+                extra = await self._filler.finish_plan(plan, snap, profile, answers, resumes, submit_names=names, job_location=job.get("location"))
+                if extra is not None and extra.auto:
+                    if self._submit_policy == "never":
+                        _unattended_review(extra.fields)
+                    more = await self._filler.fill(None, ctx.tab_id, extra, resolve_payload=ctx.resolve_payload, execute=ctx.execute)  # type: ignore[arg-type]
+                    report.filled.extend(more.filled)
+                    report.failed.extend(more.failed)
+                    report.skipped.extend(more.skipped)
+                all_reports.append({"step": step, "url": snap.url, **report.to_dict()})
+                attached.update(e["label"] for e in report.filled if str(e.get("message") or "").startswith("file attached"))
+                await self._repos.applications.update_fields(app["id"], {"fill_plan": {"steps": all_reports, "last_plan": plan.to_dict()}})
+                if report.failed and not plan.blocking and step < self.MAX_STEPS - 1 and not refilled:
+                    # Filling can re-render the form (SmartRecruiters parses an uploaded resume and
+                    # redraws every field; React forms replace nodes): read the live page once more and
+                    # fill what is still empty before asking the user.
+                    refilled = True
+                    await self._audit.log("form.refill", application_id=app["id"], failed=[e["label"] for e in report.failed][:10])
+                    await asyncio.sleep(1.5)
+                    snap = await ctx.snapshot()
+                    continue
+                if plan.blocking or any(f.status == "contradiction" for f in plan.fields) or report.failed:
+                    questions = [f.to_dict() for f in plan.fields if f.status in ("needs_input", "contradiction") and (f.required or f.status == "contradiction")]
+                    questions += [{"node": e["node"], "label": e["label"], "status": "fill_failed", "reason": e["message"]} for e in report.failed]
+                    await self._transition_via(app["id"], ApplicationState.NEEDS_USER_INPUT, f"{len(questions)} field(s) need your input", pending_questions=questions)
+                    raise NeedsUserInputError("Some required fields need your input; see the application in the dashboard.", details={"count": len(questions)})
+                if plan.review:
+                    await self._transition_via(app["id"], ApplicationState.READY_FOR_REVIEW, f"{len(plan.review)} field(s) need review", pending_questions=[f.to_dict() for f in plan.review])
+                    raise NeedsUserInputError("Fields filled; some answers need your review before submission.", details={"count": len(plan.review)})
+                before_fields = {(n.name_attr, n.id, n.name) for n in snap.form_fields()}
+                # A type-ahead (Workday skills) can leave hundreds of suggestions open, pushing the
+                # Save/Next button past the snapshot limit: close it first.
+                try:
+                    await ctx.execute(BrowserAction(type="press_key", args={"key": "Escape"}, risk=RiskLevel.LOW, verification="none", timeout_ms=3_000), None)
+                except Exception:  # noqa: BLE001 - best effort
+                    pass
                 snap = await ctx.snapshot()
-                continue
-            if plan.blocking or any(f.status == "contradiction" for f in plan.fields) or report.failed:
-                questions = [f.to_dict() for f in plan.fields if f.status in ("needs_input", "contradiction") and (f.required or f.status == "contradiction")]
-                questions += [{"node": e["node"], "label": e["label"], "status": "fill_failed", "reason": e["message"]} for e in report.failed]
-                await self._transition(app["id"], ApplicationState.NEEDS_USER_INPUT, f"{len(questions)} field(s) need your input", pending_questions=questions)
-                raise NeedsUserInputError("Some required fields need your input; see the application in the dashboard.", details={"count": len(questions)})
-            if plan.review:
-                await self._transition(app["id"], ApplicationState.READY_FOR_REVIEW, f"{len(plan.review)} field(s) need review", pending_questions=[f.to_dict() for f in plan.review])
-                raise NeedsUserInputError("Fields filled; some answers need your review before submission.", details={"count": len(plan.review)})
-            before_fields = {(n.name_attr, n.id, n.name) for n in snap.form_fields()}
-            # A type-ahead (Workday skills) can leave hundreds of suggestions open, pushing the
-            # Save/Next button past the snapshot limit: close it first.
-            try:
-                await ctx.execute(BrowserAction(type="press_key", args={"key": "Escape"}, risk=RiskLevel.LOW, verification="none", timeout_ms=3_000), None)
-            except Exception:  # noqa: BLE001 - best effort
-                pass
+                after_fields = {(n.name_attr, n.id, n.name) for n in snap.form_fields()}
+                # The new snapshot renumbered the page: re-resolve buttons against it.
+                plan.submit_node, plan.next_node = find_submit_and_next(snap.nodes, names)
+                if after_fields - before_fields and step < self.MAX_STEPS - 1:
+                    await self._audit.log("form.dynamic_fields", application_id=app["id"], new_fields=len(after_fields - before_fields))
+                    continue  # dynamic form: new fields appeared after filling; plan them too
+                if plan.submit_node is None and plan.next_node is None:
+                    # Workday redraws the step after the last field is filled and its "Save and
+                    # Continue" is briefly absent: look again once the page has settled.
+                    snap = await self._settled_snapshot(ctx, snap, max_wait=8.0)
+                    plan.submit_node, plan.next_node = find_submit_and_next(snap.nodes, names)
+                if plan.submit_node is not None:
+                    break
+                if plan.next_node is not None:
+                    await ctx.execute(BrowserAction(type="click", target=Target(strategy="node", value=str(plan.next_node)), args={}, risk=RiskLevel.MEDIUM, verification="none", timeout_ms=15_000, expected_outcome="next step"), None)
+                    snap = await self._next_step_snapshot(ctx, before_fields, snap.url)
+                    cls = classify_page(snap)
+                    if cls.kind == "login":
+                        fixed = await try_wall(snap)
+                        if fixed is not None:
+                            snap = fixed
+                            continue
+                    if cls.kind in ("login", "challenge"):
+                        await self._transition_via(app["id"], ApplicationState.AUTH_REQUIRED, "authentication/challenge during form steps" + wall_note())
+                        raise AuthRequiredError("Authentication or a challenge appeared mid-form; handle it in the browser and resume.")
+                    problems = _real_errors(snap.signals.error_messages)
+                    if problems:
+                        await self._transition_via(app["id"], ApplicationState.NEEDS_USER_INPUT, "site reported validation errors", pending_questions=[{"label": "validation", "reason": m} for m in problems[:10]])
+                        raise NeedsUserInputError("The site reported validation errors: " + "; ".join(problems[:3]))
+                    continue
+                await self._transition_via(app["id"], ApplicationState.APPLICATION_FAILED, "no submit or next button found", failure={"category": "SITE_UNSUPPORTED"})
+                raise SiteUnsupportedError("no submit or next button found")
+            assert plan is not None
+            if snap.signals.has_captcha and not captcha_done:
+                # The form is filled; the CAPTCHA on it is the user's to complete. Resume submits.
+                await self._repos.applications.update_fields(app["id"], {"fill_plan": {"steps": all_reports, "last_plan": plan.to_dict(), "captcha_handoff": True}})
+                await self._transition_via(app["id"], ApplicationState.AUTH_REQUIRED, "form filled; complete the verification on the page, then resume to submit")
+                raise HumanVerificationError("The form is filled. Tick the verification (CAPTCHA) box on the page yourself; the agent submits as soon as it is done.", details={"url": snap.url, "captcha_on_form": True})
+
+            # 4. Review gate and submission approval.
+            if plan.submit_node is None:
+                await self._transition_via(app["id"], ApplicationState.APPLICATION_FAILED, "submit button not found", failure={"category": "SITE_UNSUPPORTED"})
+                raise SiteUnsupportedError("submit button not found")
+            if not submitting:
+                requires_approval = self._submit_policy == "always" or (self._submit_policy == "per_site" and hints.get("requires_submit_confirmation", True))
+                app = await self._transition(app["id"], ApplicationState.READY_FOR_REVIEW, "form filled; awaiting submission approval" if requires_approval else "form filled")
+                if requires_approval:
+                    summary = {"summary": f"Submit application for {job.get('title')} at {job.get('company')}?", "url": snap.url, "filled": sum(len(r["filled"]) for r in all_reports), "application_id": app["id"]}
+                    approved = await ctx.request_approval("submit", summary)
+                    if not approved:
+                        await self._transition(app["id"], ApplicationState.READY_FOR_REVIEW, "submission not approved")
+                        raise NeedsUserInputError("Submission was not approved.")
+                app = await self._transition(app["id"], ApplicationState.SUBMISSION_PENDING, "submitting")
+                submitting = True
+
+            # 5. Submit and verify with authoritative evidence. Fresh snapshot first so the submit index
+            # belongs to the live page (uploads and re-renders shift node numbers).
             snap = await ctx.snapshot()
-            after_fields = {(n.name_attr, n.id, n.name) for n in snap.form_fields()}
-            # The new snapshot renumbered the page: re-resolve buttons against it.
-            plan.submit_node, plan.next_node = find_submit_and_next(snap.nodes, hints["submit_button_names"])
-            if after_fields - before_fields and step < self.MAX_STEPS - 1:
-                await self._audit.log("form.dynamic_fields", application_id=app["id"], new_fields=len(after_fields - before_fields))
-                continue  # dynamic form: new fields appeared after filling; plan them too
-            if plan.submit_node is not None:
+            submit_node, _ = find_submit_and_next(snap.nodes, names)
+            if submit_node is None:
+                await self._transition_via(app["id"], ApplicationState.APPLICATION_FAILED, "submit button disappeared before submission", failure={"category": "SITE_UNSUPPORTED"})
+                raise SiteUnsupportedError("submit button not found on the live page")
+            tried: list[tuple[Any, ...]] = []
+            go_on = False
+            for _attempt in range(3):
+                before = snap
+                clicked = snap.node(submit_node)
+                tried.append(_button_key(clicked))
+                await ctx.execute(BrowserAction(type="click", target=Target(strategy="node", value=str(submit_node)), args={}, risk=RiskLevel.HIGH, verification="none", timeout_ms=30_000, expected_outcome="confirmation page"), None)
+                after = await ctx.snapshot()
+                verdict = verify_submission(before, after, expected_confirmation_text=hints.get("confirmation_text"), expected_url_fragment=hints.get("confirmation_url_fragment"))
+                for _ in range(8):
+                    # Sites take a few seconds to send the form and show "Thank you" (or an error):
+                    # keep looking for up to ~12 s before calling the outcome uncertain.
+                    if verdict.status in (VerificationStatus.CONFIRMED, VerificationStatus.REJECTED):
+                        break
+                    await asyncio.sleep(1.5)  # a plain pause: repeated "wait" actions would trip loop detection
+                    after = await ctx.snapshot()
+                    verdict = verify_submission(before, after, expected_confirmation_text=hints.get("confirmation_text"), expected_url_fragment=hints.get("confirmation_url_fragment"))
+                if verdict.status in (VerificationStatus.CONFIRMED, VerificationStatus.REJECTED):
+                    break
+                if not (after.form_fields() and after.url == before.url):
+                    break
+                # The form is still there and nothing was said: the click went nowhere. A person
+                # would look for why: a required box still empty, another button that is the real
+                # Submit (a page's top "Apply now" often only opens the form), or a Next to go on with.
+                missing = [m for m in after.signals.missing_required if m][:15]
+                if missing:
+                    questions = [{"label": m, "reason": "the site requires this field and it is still empty"} for m in missing]
+                    await self._audit.log("submit.blocked_by_required", application_id=app["id"], fields=missing[:10])
+                    await self._transition_via(app["id"], ApplicationState.NEEDS_USER_INPUT, f"{len(missing)} required field(s) are still empty", pending_questions=questions)
+                    raise NeedsUserInputError("The site will not take the form until these required fields are filled: " + ", ".join(missing[:5]), details={"count": len(missing)})
+                rest = [n for n in after.nodes if n.role != "button" or _button_key(n) not in tried]
+                alt_submit, alt_next = find_submit_and_next(rest, names)
+                if alt_submit is not None:
+                    log.info("submit click on %r changed nothing; trying %r instead", (clicked.name if clicked else "")[:40], (after.node(alt_submit).name if after.node(alt_submit) else "")[:40])
+                    await self._audit.log("submit.retry_other_button", application_id=app["id"], clicked=(clicked.name if clicked else "")[:60])
+                    snap, submit_node = after, alt_submit
+                    continue
+                if alt_next is not None:
+                    before_fields = {(n.name_attr, n.id, n.name) for n in after.form_fields()}
+                    await self._audit.log("submit.continue_next_page", application_id=app["id"], clicked=(clicked.name if clicked else "")[:60])
+                    await ctx.execute(BrowserAction(type="click", target=Target(strategy="node", value=str(alt_next)), args={}, risk=RiskLevel.MEDIUM, verification="none", timeout_ms=15_000, expected_outcome="next step"), None)
+                    snap = await self._next_step_snapshot(ctx, before_fields, after.url)
+                    continued = True
+                    go_on = True
                 break
-            if plan.next_node is not None:
-                await ctx.execute(BrowserAction(type="click", target=Target(strategy="node", value=str(plan.next_node)), args={}, risk=RiskLevel.MEDIUM, verification="none", timeout_ms=15_000, expected_outcome="next step"), None)
-                snap = await self._next_step_snapshot(ctx, before_fields, snap.url)
-                cls = classify_page(snap)
-                if cls.kind in ("login", "challenge"):
-                    await self._transition(app["id"], ApplicationState.AUTH_REQUIRED, "authentication/challenge during form steps")
-                    raise AuthRequiredError("Authentication or a challenge appeared mid-form; handle it in the browser and resume.")
-                problems = _real_errors(snap.signals.error_messages)
-                if problems:
-                    await self._transition(app["id"], ApplicationState.NEEDS_USER_INPUT, "site reported validation errors", pending_questions=[{"label": "validation", "reason": m} for m in problems[:10]])
-                    raise NeedsUserInputError("The site reported validation errors: " + "; ".join(problems[:3]))
-                continue
-            await self._transition(app["id"], ApplicationState.APPLICATION_FAILED, "no submit or next button found", failure={"category": "SITE_UNSUPPORTED"})
-            raise SiteUnsupportedError("no submit or next button found")
-        assert plan is not None
-        if snap.signals.has_captcha and not captcha_done:
-            # The form is filled; the CAPTCHA on it is the user's to complete. Resume submits.
-            await self._repos.applications.update_fields(app["id"], {"fill_plan": {"steps": all_reports, "last_plan": plan.to_dict(), "captcha_handoff": True}})
-            await self._transition(app["id"], ApplicationState.AUTH_REQUIRED, "form filled; complete the verification on the page, then resume to submit")
-            raise HumanVerificationError("The form is filled. Tick the verification (CAPTCHA) box on the page yourself; the agent submits as soon as it is done.", details={"url": snap.url, "captcha_on_form": True})
-
-        # 4. Review gate and submission approval.
-        if plan.submit_node is None:
-            await self._transition(app["id"], ApplicationState.APPLICATION_FAILED, "submit button not found", failure={"category": "SITE_UNSUPPORTED"})
-            raise SiteUnsupportedError("submit button not found")
-        requires_approval = self._submit_policy == "always" or (self._submit_policy == "per_site" and hints.get("requires_submit_confirmation", True))
-        app = await self._transition(app["id"], ApplicationState.READY_FOR_REVIEW, "form filled; awaiting submission approval" if requires_approval else "form filled")
-        if requires_approval:
-            summary = {"summary": f"Submit application for {job.get('title')} at {job.get('company')}?", "url": snap.url, "filled": sum(len(r["filled"]) for r in all_reports), "application_id": app["id"]}
-            approved = await ctx.request_approval("submit", summary)
-            if not approved:
-                await self._transition(app["id"], ApplicationState.READY_FOR_REVIEW, "submission not approved")
-                raise NeedsUserInputError("Submission was not approved.")
-        app = await self._transition(app["id"], ApplicationState.SUBMISSION_PENDING, "submitting")
-
-        # 5. Submit and verify with authoritative evidence. Fresh snapshot first so the submit index
-        # belongs to the live page (uploads and re-renders shift node numbers).
-        snap = await ctx.snapshot()
-        submit_node, _ = find_submit_and_next(snap.nodes, hints["submit_button_names"])
-        if submit_node is None:
-            await self._transition(app["id"], ApplicationState.APPLICATION_FAILED, "submit button disappeared before submission", failure={"category": "SITE_UNSUPPORTED"})
-            raise SiteUnsupportedError("submit button not found on the live page")
-        before = snap
-        await ctx.execute(BrowserAction(type="click", target=Target(strategy="node", value=str(submit_node)), args={}, risk=RiskLevel.HIGH, verification="none", timeout_ms=30_000, expected_outcome="confirmation page"), None)
-        after = await ctx.snapshot()
-        verdict = verify_submission(before, after, expected_confirmation_text=hints.get("confirmation_text"), expected_url_fragment=hints.get("confirmation_url_fragment"))
-        for _ in range(8):
-            # Sites take a few seconds to send the form and show "Thank you" (or an error):
-            # keep looking for up to ~12 s before calling the outcome uncertain.
-            if verdict.status in (VerificationStatus.CONFIRMED, VerificationStatus.REJECTED):
-                break
-            await asyncio.sleep(1.5)  # a plain pause: repeated "wait" actions would trip loop detection
-            after = await ctx.snapshot()
-            verdict = verify_submission(before, after, expected_confirmation_text=hints.get("confirmation_text"), expected_url_fragment=hints.get("confirmation_url_fragment"))
+            if go_on and verdict.status not in (VerificationStatus.CONFIRMED, VerificationStatus.REJECTED):
+                continue  # next round: fill the following page, then submit from there
+            break
+        assert verdict is not None
         evidence = {**verdict.evidence, "checked_at": now_iso(), "source": "post_submit_snapshot"}
         if verdict.status == VerificationStatus.CONFIRMED:
             await self._transition(app["id"], ApplicationState.APPLIED_CONFIRMED, verdict.message, verification_status=verdict.status.value, reference_number=verdict.reference_number, evidence=evidence, applied_at=now_iso())
@@ -627,3 +824,28 @@ class ApplicationWorkflow:
             raise SubmissionRejectedError(verdict.message, details={"errors": after.signals.error_messages[:5]})
         await self._transition(app["id"], ApplicationState.APPLICATION_FAILED, verdict.message, verification_status=verdict.status.value, evidence=evidence, failure={"category": "SUBMISSION_UNCERTAIN", "message": verdict.message})
         raise SubmissionUncertainError(verdict.message, details={"url": after.url})
+
+    async def _recent_signin_failures(self, host: str) -> int:
+        """Failed automatic sign-in / sign-up attempts on this host in the last two days."""
+        try:
+            row = await self._repos.db.fetch_one(
+                "SELECT COUNT(*) AS n FROM audit_events WHERE event = 'signin.attempt' AND ts >= datetime('now', '-2 days') AND data_json LIKE ? AND data_json LIKE '%\"status\":\"failed\"%'",
+                (f'%"host":"{host}"%',),
+            )
+            return int(row["n"]) if row else 0
+        except Exception:  # noqa: BLE001 - a missing table (tests) means no history
+            return 0
+
+    async def _transition_via(self, app_id: str, state: ApplicationState, reason: str, **fields: Any) -> dict[str, Any]:
+        """``_transition`` that also works after a submit click went nowhere: from SUBMISSION_PENDING
+        the state machine only allows a step back through READY_FOR_REVIEW (and IN_PROGRESS), so
+        those are taken first when the target needs them."""
+        try:
+            return await self._transition(app_id, state, reason, **fields)
+        except ValueError:
+            await self._transition(app_id, ApplicationState.READY_FOR_REVIEW, "the submit click did not go through")
+            try:
+                return await self._transition(app_id, state, reason, **fields)
+            except ValueError:
+                await self._transition(app_id, ApplicationState.IN_PROGRESS, "continuing on the next page of the form")
+                return await self._transition(app_id, state, reason, **fields)

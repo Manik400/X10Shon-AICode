@@ -118,6 +118,8 @@ export interface PageSignals {
   unsupported_reasons: string[];
   iframe_srcs: string[];
   has_jsonld_jobposting: boolean;
+  /** Visible required fields that are still empty (the browser would refuse the submit). */
+  missing_required: string[];
 }
 
 export interface PageSnapshot {

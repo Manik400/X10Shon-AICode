@@ -255,7 +255,13 @@ class TaskRunner:
         ver = verify_action(action, result, snap, after)
         entry = {"seq": seq, "type": action.type, "target": action.target.model_dump() if action.target else None, "ok": result.ok, "verified": ver.ok, "message": result.message or ver.message, "url": result.url}
         self.history.append(entry)
-        await self.repos.tasks.add_attempt(self.task["id"], seq, action.model_dump(mode="json"), {**result.model_dump(mode="json"), "verification": {"ok": ver.ok, "strategy": ver.strategy, "message": ver.message}}, result.ok and ver.ok, result.duration_ms)
+        recorded_action = action.model_dump(mode="json")
+        recorded_result = {**result.model_dump(mode="json"), "verification": {"ok": ver.ok, "strategy": ver.strategy, "message": ver.message}}
+        if recorded_action.get("args", {}).get("credential"):
+            # A stored site password is typed, never written to the task log.
+            recorded_action["args"]["text"] = "***"
+            recorded_result["value"] = "***"
+        await self.repos.tasks.add_attempt(self.task["id"], seq, recorded_action, recorded_result, result.ok and ver.ok, result.duration_ms)
         await self.repos.tasks.update_progress(self.task["id"], {"last_action": entry, "message": self.message}, action_count=self.action_count)
         if not result.ok and result.error_category == "PERMISSION_DENIED":
             raise PermissionDeniedError(result.message)
@@ -408,6 +414,8 @@ class TaskRunner:
                 result = await self._run_ask(task)
             elif task["kind"] == "fill_page":
                 result = await self._run_fill_page(task)
+            elif task["kind"] == "edit_page":
+                result = await self._run_edit_page(task)
             else:
                 result = await self._run_general(task)
             await self.repos.tasks.set_status(task["id"], TaskStatus.SUCCEEDED, result=result, action_count=self.action_count)
@@ -646,7 +654,7 @@ class TaskRunner:
                         await self._close_item_tab(tab_id)
                     outcomes.append(item)
                     continue
-                job, dup = await self.jobs.import_from_snapshot(page, source_kind="manual", task_id=task["id"])
+                job, dup = await self.jobs.import_from_snapshot(page, source_kind="manual", task_id=task["id"], screen_with_model=False)
                 app = await self.repos.applications.get_by_job(job["id"])
                 item["job_id"] = job["id"]
                 if app is not None and app["state"] == "IN_PROGRESS" and not await self._app_has_live_task(app["id"], task["id"]):
@@ -792,7 +800,7 @@ class TaskRunner:
         from ..applications.workflow import looks_like_application
         from ..core.actions import Target
 
-        from ..applications.workflow import find_apply_button
+        from ..applications.workflow import find_apply_button, linkedin_easy_apply_only
         from ..jobs.listing import embedded_application_url
 
         profile = CandidateProfile.model_validate(await self.repos.profile.get() or {})
@@ -805,6 +813,8 @@ class TaskRunner:
                 return {"verdict": "sign_in_needed", "state": "AUTH_REQUIRED", "note": f"{cls.kind} page ({cls.auth_state.value}) at {snap.url[:90]}"}
             if snap.form_fields():
                 break
+            if linkedin_easy_apply_only(snap):
+                return {"verdict": "easy_apply", "state": "SKIPPED", "note": "LinkedIn Easy Apply job; left alone"}
             embedded = embedded_application_url(snap)
             if embedded and embedded.split("#")[0] != snap.url.split("#")[0]:
                 await self.execute(BrowserAction(type="navigate", args={"url": embedded}, verification="navigation_complete", timeout_ms=30_000))
@@ -817,7 +827,8 @@ class TaskRunner:
             snap = await self.snapshot()
         else:
             return {"verdict": "no_form", "note": "could not reach a form"}
-        plan = await self.workflow._filler.plan(snap, profile, answers, resumes, submit_names=["Submit application", "Submit Application", "Submit", "Apply", "Send application"], job_location=job_location)
+        plan = await self.workflow._filler.plan(snap, profile, answers, resumes, submit_names=["Submit application", "Submit Application", "Submit", "Apply", "Send application"], job_location=job_location, model_budget_seconds=self.s.model_request_timeout_seconds)
+        self.workflow._filler.discard_pending(plan)
         not_application = looks_like_application(snap, plan)
         if not_application:
             return {"verdict": "not_application", "note": not_application}
@@ -901,7 +912,7 @@ class TaskRunner:
         cls = classify_page(snap)
         if cls.needs_human:
             raise AuthRequiredError(f"page requires authentication ({cls.auth_state.value}); log in and resume")
-        job, dup = await self.jobs.import_from_snapshot(snap, source_kind="manual", task_id=task["id"])
+        job, dup = await self.jobs.import_from_snapshot(snap, source_kind="manual", task_id=task["id"], screen_with_model=False)
         await self.repos.tasks.set_status(task["id"], TaskStatus.RUNNING, job_id=job["id"])
         return {"job_id": job["id"], "duplicate": dup, "title": job.get("title"), "company": job.get("company"), "match_score": job.get("match_score")}
 
@@ -938,9 +949,64 @@ class TaskRunner:
                 f.status = "auto"
         self.message = "filling the form"
         report = await self.workflow._filler.fill(None, self.tab_id, plan, resolve_payload=self.resolve_payload, execute=self.execute)  # type: ignore[arg-type]
+        # The rules' fields are on the page already; give the (slow) model a short while longer for
+        # the rest, then fill those too. The user is watching, so this does not wait the full grace.
+        self.message = "checking the remaining fields"
+        extra = await self.workflow._filler.finish_plan(plan, snap, profile, answers, resumes, submit_names=["Submit", "Apply"], job_location=location_from_page(snap), extra_wait=min(20.0, self.workflow._filler.grace_seconds()))
+        if extra is not None:
+            for f in extra.fields:
+                if f.status == "needs_review" and f.value and f.provenance.value in ("verified_fact", "approved_answer"):
+                    f.status = "auto"
+        if extra is not None and extra.auto:
+            more = await self.workflow._filler.fill(None, self.tab_id, extra, resolve_payload=self.resolve_payload, execute=self.execute)  # type: ignore[arg-type]
+            report.filled.extend(more.filled)
+            report.failed.extend(more.failed)
+            report.skipped.extend(more.skipped)
         left = [f.label for f in plan.fields if f.status in ("needs_input", "needs_review", "contradiction") and f.label] + [e["label"] for e in report.failed if e.get("label")]
         summary = f"Filled {len(report.filled)} field(s). " + (f"Left for you: {', '.join(left[:12])}." if left else "Nothing left to fill.") + " Nothing was submitted: check the page and submit when ready."
         return {"summary": summary, "filled": len(report.filled), "left_for_you": left, "kept_your_answers": sum(1 for f in plan.fields if f.reason == "answered on the page by you")}
+
+    async def _run_edit_page(self, task: dict[str, Any]) -> dict[str, Any]:
+        """Change fields of the form in front of the user as instructed ("put my GitHub in link
+        2"). Rules first, then one bounded model call; the edits are typed through the normal
+        filler. Never submits."""
+        from ..applications.field_mapping import FieldPlan, FillPlan
+        from ..applications.page_edits import build_edit_prompt, edits_from_model, rule_edits
+        from ..core.enums import Provenance
+        from ..models.base import ModelRequest
+        from ..models.schemas import EditsOutput
+
+        instruction = (task.get("instruction") or "").strip()
+        snap = await self.snapshot()
+        fields = [n for n in snap.form_fields() if n.visible and not n.disabled]
+        if not fields:
+            return {"summary": "There is no form on this page to change.", "edits": []}
+        profile = CandidateProfile.model_validate(await self.repos.profile.get() or {})
+        facts = profile.facts()
+        self.message = "working out what to change"
+        edits = rule_edits(instruction, fields, facts)
+        note = ""
+        gateway = self.intents.gateway
+        if not edits and gateway.role_config("field_mapper").provider != "heuristic":
+            system, prompt = build_edit_prompt(instruction, fields, facts)
+            self.message = "asking the local model which fields to change"
+            try:
+                out = await asyncio.wait_for(gateway.complete("field_mapper", ModelRequest(task="edit_page", system=system, prompt=prompt, json_schema={}, inputs={"instruction": instruction}), EditsOutput, task_id=task["id"], use_cache=False, max_output_tokens=600), timeout=self.s.model_request_timeout_seconds)
+                edits = edits_from_model(out, fields)
+                note = out.note
+            except Exception as exc:  # noqa: BLE001 - say so instead of guessing
+                log.info("edit_page: model unavailable: %s", exc)
+                note = "the local model did not answer in time"
+        if not edits:
+            return {"summary": "I could not tell which fields to change" + (f" ({note})" if note else "") + '. Say the field and the value, e.g. "set Link 2 to my GitHub".', "edits": []}
+        by_node = {n.i: n for n in fields}
+        plan = FillPlan(fields=[FieldPlan(node=e.node, label=e.label, field_type=e.field_type, required=False, category="edit", value=e.value, provenance=Provenance.VERIFIED_FACT, confidence=1.0, status="auto", reason=e.reason, options=by_node[e.node].options) for e in edits])
+        self.message = "changing the fields"
+        report = await self.workflow._filler.fill(None, self.tab_id, plan, resolve_payload=self.resolve_payload, execute=self.execute)  # type: ignore[arg-type]
+        done = [f"{e.label or 'field ' + str(e.node)} → {e.value[:50]}" for e in edits if any(str(x.get("node")) == str(e.node) for x in report.filled)]
+        failed = [f"{x.get('label') or x.get('node')}: {x.get('message', '')[:60]}" for x in report.failed]
+        summary = (f"Changed {len(done)} field(s): " + "; ".join(done) if done else "Nothing changed") + (f". Could not change: {'; '.join(failed)}" if failed else "") + (f". {note}" if note else "") + ". Nothing was submitted."
+        return {"summary": summary, "edits": [{"node": e.node, "label": e.label, "value": e.value, "reason": e.reason} for e in edits], "failed": report.failed}
 
     async def _run_ask(self, task: dict[str, Any]) -> dict[str, Any]:
         """Assistant mode: answer a free-form request about the current page or PDF with the local
@@ -1175,6 +1241,9 @@ class TaskManager:
         if t["status"] != "waiting_user":
             raise ValueError(f"task is {t['status']}, not waiting_user")
         app_id = t.get("application_id")
+        if app_id and any((r.task or {}).get("application_id") == app_id for r, _ in self._running.values()):
+            # Two runs on one application at once would fight over its state and its tab.
+            raise ValueError("another task is already working on this application")
         # The application stays in its waiting state (AUTH_REQUIRED / NEEDS_USER_INPUT /
         # READY_FOR_REVIEW): the workflow sees it is a resume and continues on the open page,
         # keeping what the user typed, instead of re-queuing and reloading the job from scratch.

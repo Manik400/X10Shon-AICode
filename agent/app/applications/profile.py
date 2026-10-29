@@ -120,8 +120,23 @@ class LegalAnswers(BaseModel):
     board_or_official: str = ""  # board member / director / government official / politically exposed
 
 
+class SiteAccount(BaseModel):
+    """A login the agent may use on a site's own sign-in wall (stored unencrypted in the local
+    database, like the rest of the profile). ``host`` matches the page host or any subdomain of
+    it: "wellfound.com", "accenture.wd103.myworkdayjobs.com"."""
+
+    host: str = ""
+    email: str = ""
+    password: str = ""
+    created_by_agent: bool = False  # the agent created this account itself (Workday) and chose the password
+    note: str = ""
+    # Earlier passwords for this host (a second sign-up attempt must never lose the first one).
+    previous_passwords: list[str] = Field(default_factory=list)
+
+
 class CandidateProfile(BaseModel):
     contact: Contact = Field(default_factory=Contact)
+    accounts: list[SiteAccount] = Field(default_factory=list)
     summary: str = ""
     skills: list[str] = Field(default_factory=list)
     languages: list[str] = Field(default_factory=list)  # e.g. ["English (fluent)", "German (basic)"]
@@ -147,9 +162,22 @@ class CandidateProfile(BaseModel):
                 out.append(s2)
         return out
 
+    def account_for(self, host: str) -> SiteAccount | None:
+        """The stored account for a page host: an exact host first, then the closest parent
+        domain ("jobs.example.com" uses the "example.com" account)."""
+        h = (host or "").lower().removeprefix("www.").split(":")[0]
+        best: SiteAccount | None = None
+        for a in self.accounts:
+            ah = a.host.strip().lower().removeprefix("www.")
+            if not ah or not a.password or not (h == ah or h.endswith("." + ah)):
+                continue
+            if best is None or len(ah) > len(best.host.strip().lower().removeprefix("www.")):
+                best = a
+        return best
+
     # ------------------------------------------------------------------ facts
     def facts(self) -> dict[str, tuple[str, Provenance]]:
-        """Flatten to dot keys. Only non-empty values are facts."""
+        """Flatten to dot keys. Only non-empty values are facts (site passwords never are)."""
         out: dict[str, tuple[str, Provenance]] = {}
 
         def put(key: str, val: Any) -> None:

@@ -39,5 +39,7 @@ $lnk.WorkingDirectory = $root
 $lnk.IconLocation = "$env:ProgramFiles\Google\Chrome\Application\chrome.exe,0"
 $lnk.Save()
 Write-Host "Desktop shortcut 'LFA Chrome' created."
+# "LFA Start": starts the agent and Ollama when they are down and opens the dashboard.
+& (Join-Path $root "scripts\start-all.ps1") -NoBrowser -CreateShortcut
 Start-ScheduledTask -TaskName $taskName
 Write-Host "Agent started."

@@ -146,6 +146,19 @@ export default function Settings() {
             <option value="never">never ask (submit automatically)</option>
           </select>
         </label>
+        <label>
+          Tabs left waiting for me before no new jobs are opened (open ones are finished first){' '}
+          <input type="number" min={1} max={20} value={cfg.max_waiting_tabs ?? 3} onChange={(e) => up({ max_waiting_tabs: Math.min(20, Math.max(1, Number(e.target.value))) })} />
+        </label>
+        <div className="span2 row wrap">
+          Unattended runs:
+          <label className="checkbox">
+            <input type="checkbox" checked={cfg.auto_sign_in ?? true} onChange={(e) => up({ auto_sign_in: e.target.checked })} /> sign in with my saved site accounts
+          </label>
+          <label className="checkbox">
+            <input type="checkbox" checked={cfg.auto_create_accounts ?? true} onChange={(e) => up({ auto_create_accounts: e.target.checked })} /> create an account where the site offers one (Workday)
+          </label>
+        </div>
         <label className="span2">
           Allowed domains (comma separated; the agent never acts outside this list)
           <input value={cfg.allowed_domains.join(', ')} onChange={(e) => up({ allowed_domains: e.target.value.split(',').map((s) => s.trim()).filter(Boolean) })} placeholder="boards.greenhouse.io, jobs.lever.co" />

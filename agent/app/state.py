@@ -56,6 +56,9 @@ class AppContext:
     pairing: PairingService
     resources: ResourceMonitor
     started_at: str
+    # An extension has been paired: scheduled applications belong in the user's Chrome, so the
+    # scheduler waits for it to (re)connect instead of running them in the headless browser.
+    extension_paired: bool = False
 
     async def fetch_public_snapshot(self, url: str):  # type: ignore[no-untyped-def]
         """Snapshot of a public page through headless Playwright (no user session). Returns
@@ -90,10 +93,20 @@ class AppContext:
         scheduler creates work, so tasks are not started only to die on a missing browser."""
         if self.hub.connected:
             return True, ""
+        if self.extension_paired:
+            return False, "the Chrome extension is not connected (it reconnects within a minute; applications run in your Chrome, not headless)"
         free = self.playwright_driver.free_pages()
         if free <= 0:
             return False, f"extension not connected and all {self.playwright_driver._max_pages} Playwright pages are in use"
         return True, ""
+
+    def browser_capacity(self) -> int:
+        """Pages scheduled tasks may open right now: unbounded through the extension, otherwise
+        the headless browser's free pages (without this cap a tick started five tasks on a
+        two-page browser and three of them died at once with "max concurrent pages reached")."""
+        if self.hub.connected:
+            return 10_000
+        return self.playwright_driver.free_pages()
 
 
 async def build_context(settings: Settings, *, db_path: Path | str | None = None) -> AppContext:
@@ -161,6 +174,10 @@ async def build_context(settings: Settings, *, db_path: Path | str | None = None
         started_at=now_iso(),
     )
     ctx_holder["ctx"] = ctx
+    try:
+        ctx.extension_paired = bool(await repos.pairings.list())
+    except Exception:  # noqa: BLE001 - a fresh database has no pairings table content yet
+        ctx.extension_paired = False
 
     def _apply_limits(cfg: SchedulerConfig) -> None:
         # One source of truth for "how many at once" and "how often to retry": the saved scheduler
@@ -171,6 +188,9 @@ async def build_context(settings: Settings, *, db_path: Path | str | None = None
 
     scheduler.on_config(_apply_limits)
     scheduler.browser_ready = ctx.browser_ready
+    scheduler.browser_capacity = ctx.browser_capacity
+    scheduler.inspect_tab = lambda tab_id: ext_driver.snapshot(tab_id, max_nodes=settings.snapshot_max_nodes)
+    scheduler.close_tab = ext_driver.close_tab
     await scheduler.load()
     # Apply persisted model roles and settings to the gateway/policy.
     if scheduler.config.model_roles:
@@ -197,6 +217,14 @@ async def build_context(settings: Settings, *, db_path: Path | str | None = None
     scheduler._warm = gateway.warm_up
     scheduler.on_config(lambda cfg: setattr(workflow, "_submit_policy", cfg.approval_policy))
     workflow._submit_policy = scheduler.config.approval_policy
+
+    def _apply_unattended(cfg: SchedulerConfig) -> None:
+        workflow.auto_sign_in = cfg.auto_sign_in
+        workflow.auto_create_accounts = cfg.auto_create_accounts
+        policy.allow_stored_credentials = cfg.auto_sign_in
+
+    scheduler.on_config(_apply_unattended)
+    _apply_unattended(scheduler.config)
 
     # When the user finishes a login / challenge in a tab the agent handed over, the next page
     # load is inspected; if the page no longer needs a human, the waiting task resumes itself.

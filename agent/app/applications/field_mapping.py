@@ -44,6 +44,9 @@ _RULES: list[tuple[re.Pattern[str], str, str]] = [
     (re.compile(r"^(?!.*countr)(?=.*(\bstate\b|province|region))", re.I), "contact.state", "contact"),
     (re.compile(r"zip|postal|pin ?code", re.I), "contact.postal_code", "contact"),
     (re.compile(r"country", re.I), "contact.country", "contact"),
+    # Workday's "Local Given Name(s)" / "Local Family Name(s)" (name in the local script): the same name.
+    (re.compile(r"local (given|first) names?", re.I), "contact.first_name", "contact"),
+    (re.compile(r"local (family|last|sur) ?names?", re.I), "contact.last_name", "contact"),
     (re.compile(r"linkedin", re.I), "links.linkedin", "links"),
     (re.compile(r"github", re.I), "links.github", "links"),
     (re.compile(r"portfolio", re.I), "links.portfolio", "links"),
@@ -124,6 +127,9 @@ class FillPlan:
     fields: list[FieldPlan] = field(default_factory=list)
     submit_node: int | None = None
     next_node: int | None = None
+    # A model field-mapping call still running when the rules-only plan was returned (see
+    # FormFiller.plan / finish_plan); never serialised.
+    pending_model: Any = None
 
     @property
     def blocking(self) -> list[FieldPlan]:
@@ -316,7 +322,8 @@ def _mentions_home(label: str, home: str) -> bool:
     return home.strip().lower() in label.lower()
 
 
-_DIAL_CODE_RE = re.compile(r"country code|dial(ing)? code|phone (country|prefix)|calling code|^\+\d{1,3}$|^[a-z]{2} \+\d{1,3}$", re.I)
+_DIAL_CODE_RE = re.compile(r"country (phone )?code|phone code|dial(ing)? code|phone (country|prefix)|calling code|^\+\d{1,3}$|^[a-z]{2} \+\d{1,3}$|\(\+\d{1,3}\)", re.I)
+_PHONE_TYPE_RE = re.compile(r"phone (device )?type|device type|type of (phone|number)|^phone kind", re.I)
 
 
 def _phone_for_field(phone: str, n: SnapshotNode, nodes: list[SnapshotNode]) -> str:
@@ -326,8 +333,10 @@ def _phone_for_field(phone: str, n: SnapshotNode, nodes: list[SnapshotNode]) -> 
     national = digits[2:] if digits.startswith("91") and len(digits) == 12 else digits[-10:] if len(digits) > 10 else digits
     if len(national) == len(digits):
         return phone
+    # A country-code box near this one (Workday's "Country Phone Code" picker is a composite of
+    # several nodes, so "near" is generous), or one already showing "India (+91)".
     separate_code = any(
-        x.i != n.i and abs(x.i - n.i) <= 4 and (_DIAL_CODE_RE.search(x.name or "") or _DIAL_CODE_RE.search(x.placeholder or ""))
+        x.i != n.i and abs(x.i - n.i) <= 10 and (_DIAL_CODE_RE.search(x.name or "") or _DIAL_CODE_RE.search(x.placeholder or "") or _DIAL_CODE_RE.search(x.value or "") or _DIAL_CODE_RE.search(x.section or ""))
         for x in nodes
     )
     short_box = bool(n.maxlength and n.maxlength < len(phone.replace(" ", "")))
@@ -483,7 +492,41 @@ def _choose_option(options: list[str] | None, value: str) -> str | None:
     chosen = _choose_option_exactish(options, value)
     if chosen is None and options:
         chosen = _equivalent_option(options, value)
+    if chosen is None and options:
+        chosen = _closest_option_by_words(options, value)
     return chosen
+
+
+_STOP_WORDS = frozenset({"the", "a", "an", "of", "and", "or", "in", "on", "at", "to", "for", "with", "from", "by", "via", "our", "your", "my", "other", "please", "select", "one"})
+
+
+def _words(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z0-9]+", (text or "").lower()) if len(w) >= 3 and w not in _STOP_WORDS}
+
+
+def _closest_option_by_words(options: list[str], value: str) -> str | None:
+    """The option sharing the most meaningful words with the answer ("Company careers website"
+    → "Company Website"), when at least one real word is shared and the choice is not a tie
+    between unrelated options. Yes/No and decline answers never go through this."""
+    vw = _words(value)
+    if not vw or value.strip().lower() in ("yes", "no"):
+        return None
+    scored = []
+    for o in options:
+        ow = _words(o)
+        if not ow or _DECLINE_RE.search(o):
+            continue
+        shared = vw & ow
+        if not shared:
+            continue
+        scored.append((len(shared) / max(1, len(ow)), len(shared), -len(o), o))
+    if not scored:
+        return None
+    scored.sort(reverse=True)
+    best = scored[0]
+    if len(scored) > 1 and scored[1][:2] == best[:2]:
+        return None  # two options fit equally well: not a safe pick
+    return best[3]
 
 
 def _choose_option_exactish(options: list[str] | None, value: str) -> str | None:
@@ -825,6 +868,14 @@ def build_fill_plan(
                 fp.reason = f"expected salary in {cur}"
             else:
                 fp.reason = "salary currency unknown for this job" if not cur else f"no expected salary saved in {cur}"
+        elif _PHONE_TYPE_RE.search(clean_label(label)) and facts.get("contact.phone"):
+            # "Phone Device Type" / "Phone type": the saved number is a mobile; "Mobile" (or the
+            # nearest wording the list offers) is the answer, nothing from the profile is needed.
+            pick = next((o for o in (n.options or []) if re.search(r"mobile|cell|cellular", o, re.I)), None) or next((o for o in (n.options or []) if re.search(r"\b(main|home|personal|primary)\b", o, re.I)), None)
+            if pick or not n.options:
+                value, prov = (pick or "Mobile"), Provenance.VERIFIED_FACT
+                fp.confidence = max(fp.confidence, 0.9)
+                fp.reason = "your saved number is a mobile"
         elif _RESIDENCE_RE.search(clean_label(label)) and not _WHICH_RE.search(clean_label(label)) and (not n.options or _choose_option(n.options, "Yes")) and facts.get("contact.country"):
             # "Are you based in / located in / living in X?": Yes only where you actually live.
             home = facts["contact.country"][0]
@@ -882,6 +933,12 @@ def build_fill_plan(
             if value is None:
                 fp.reason = "none of your languages is among the options"
 
+        if value is None and fp.profile_key == "contact.address_line2" and n.required and facts.get("contact.city"):
+            # A required second address line with nothing saved for it: the locality is what a
+            # person writes there.
+            value, prov = facts["contact.city"]
+            fp.confidence = max(fp.confidence, 0.7)
+            fp.reason = "required; your city stands in for an empty address line 2"
         sensitive = fp.legally_significant or is_sensitive_question(clean_label(label)) or fp.category == "legal"
         if value is None:
             fp.status = "needs_input" if (n.required or sensitive) else "skip"
@@ -959,24 +1016,81 @@ def build_fill_plan(
             f.status, f.reason = "skip", "an education entry is already on the form"
         elif has_employment and (key.startswith("employment[") or (key.startswith("employment") and in_block)):
             f.status, f.reason = "skip", "a work-experience entry is already on the form"
+    _spread_links(plan, facts)
 
     return plan
 
 
+_GENERIC_LINK_LABEL_RE = re.compile(r"^(link|url|website|web ?site|profile( link| url)?|additional (link|url)|other (link|url)|social( media)?( link| profile)?)\s*#?\d*$", re.I)
+_LINK_ORDER = ("links.portfolio", "links.github", "links.linkedin", "links.other", "links.website")
+
+
+def _spread_links(plan: FillPlan, facts: dict[str, tuple[str, Provenance]]) -> None:
+    """Several generic link boxes ("Link 1", "Link 2", "Link 3") each get a different link
+    (portfolio, GitHub, LinkedIn, …) instead of the same one three times. Boxes whose label
+    names a site keep what they have."""
+    link_fields = [f for f in plan.fields if f.status == "auto" and f.value and (str(f.profile_key or "").startswith("links.") or _GENERIC_LINK_LABEL_RE.match(clean_label(f.label)))]
+    by_value: dict[str, list[FieldPlan]] = {}
+    for f in link_fields:
+        by_value.setdefault(f.value, []).append(f)
+    dups = [fs for fs in by_value.values() if len(fs) > 1]
+    if not dups:
+        return
+    pool: list[str] = []
+    for k in _LINK_ORDER:
+        v = facts.get(k, ("", None))[0]
+        if v and v not in pool:
+            pool.append(v)
+    used = {f.value for f in link_fields}
+    for fs in dups:
+        for f in fs[1:]:
+            if re.search(r"linkedin|github|portfolio|leetcode", clean_label(f.label), re.I):
+                continue
+            nxt = next((v for v in pool if v not in used), None)
+            if nxt is None:
+                f.status, f.reason = "skip", "no other link left for this box (the same one is already given above)"
+                continue
+            used.add(nxt)
+            f.value, f.reason = nxt, "a different link for each link box"
+
+
+_FIELD_ROLES = frozenset({"textbox", "combobox", "listbox", "checkbox", "radio", "switch", "slider", "spinbutton", "file", "date"})
+_NEXT_NAMES = frozenset({"next", "continue", "next step", "next page", "save and continue", "save & continue", "save and next", "save & next", "proceed", "continue to next step", "review", "review application", "weiter", "dalej", "suivant", "siguiente", "continuar", "continuer", "avanti", "volgende"})
+
+
 def find_submit_and_next(nodes: list[SnapshotNode], submit_names: list[str]) -> tuple[int | None, int | None]:
     """Submit / next buttons of a snapshot. Node indices are only valid for the snapshot they came
-    from, so callers re-run this on a fresh snapshot right before clicking."""
-    submit_node: int | None = None
-    next_node: int | None = None
+    from, so callers re-run this on a fresh snapshot right before clicking.
+
+    When several buttons carry a submit-like name, the one that belongs to the form holding the
+    fields wins (its ``type=submit`` button first), then the first one below the fields: a page's
+    own "Apply now" above the form only opens or scrolls to it, the real one sits at its end.
+    """
+    fields = [n for n in nodes if n.visible and n.role in _FIELD_ROLES]
+    field_forms = {n.form for n in fields if n.form is not None}
+    last_field = max((n.i for n in fields), default=-1)
     buttons = [n for n in nodes if n.role == "button" and not n.disabled and n.visible]
-    for b in buttons:
-        nm = (b.name or "").strip().lower()
-        if any(nm == s.lower() or nm.startswith(s.lower()) for s in submit_names):
-            submit_node = b.i
-            break
-    for b in buttons:
-        nm = (b.name or "").strip().lower()
-        if nm in ("next", "continue", "next step", "save and continue", "save & continue") or nm.startswith("next"):
-            next_node = b.i
-            break
+
+    def rank(b: SnapshotNode) -> int:
+        in_form = b.form is not None and b.form in field_forms
+        if in_form and (b.type or "").lower() == "submit":
+            return 0
+        if in_form:
+            return 1
+        if b.i > last_field:
+            return 2
+        return 3
+
+    def pick(match: Any) -> tuple[int | None, int]:
+        cands = [b for b in buttons if match((b.name or "").strip().lower())]
+        if not cands:
+            return None, 9
+        best = min(cands, key=lambda b: (rank(b), b.i))
+        return best.i, rank(best)
+
+    submit_node, submit_rank = pick(lambda nm: any(nm == s.lower() or nm.startswith(s.lower()) for s in submit_names))
+    next_node, next_rank = pick(lambda nm: nm in _NEXT_NAMES or nm.startswith("next") or nm.startswith("continue"))
+    if submit_node is not None and next_node is not None and next_rank < submit_rank:
+        # A wizard step: its Next belongs to the form, the "Submit" found is elsewhere on the page.
+        submit_node = None
     return submit_node, next_node

@@ -51,7 +51,7 @@ export interface TabSummary {
 export type ContentRequest = { kind: 'snapshot'; max_nodes?: number } | { kind: 'action'; action: BrowserAction; payload?: ActionPayload | null } | { kind: 'ping' };
 
 export type UiRequest =
-  | { kind: 'get_state' }
+  | { kind: 'get_state'; windowId?: number }
   | { kind: 'reconnect' }
   | { kind: 'disconnect' }
   | { kind: 'pair'; code: string }

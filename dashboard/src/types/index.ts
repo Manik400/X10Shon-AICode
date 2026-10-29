@@ -177,8 +177,17 @@ export interface Paged<T> {
   offset?: number;
 }
 
+export interface SiteAccount {
+  host: string;
+  email: string;
+  password: string;
+  created_by_agent?: boolean;
+  note?: string;
+}
+
 export interface Profile {
   contact: Record<string, string>;
+  accounts?: SiteAccount[];
   summary: string;
   skills: string[];
   experience_years: number | null;
@@ -224,6 +233,9 @@ export interface SchedulerConfig {
   max_retries: number;
   retry_base_seconds: number;
   approval_policy: 'always' | 'never' | 'per_site';
+  auto_sign_in?: boolean;
+  auto_create_accounts?: boolean;
+  max_waiting_tabs?: number;
   auto_pause_on_resource_pressure: boolean;
   wake_interval_seconds: number;
   max_ram_mb: number;

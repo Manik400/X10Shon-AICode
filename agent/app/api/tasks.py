@@ -49,11 +49,19 @@ async def create_task(body: TaskBody, ctx: Ctx, _: Auth) -> dict:
         if _not_job.search(_host):
             raise HTTPException(400, f"{_host} is not a job page. Open a job posting or a list of jobs, then try again.")
     tab_snap = None
-    if kind in ("apply", "apply_list") and body.tab_id is not None and ctx.hub.connected:
+    if kind in ("apply", "apply_list", "ask") and body.tab_id is not None and ctx.hub.connected:
         try:
             tab_snap = await ctx.extension_driver.snapshot(str(body.tab_id), max_nodes=ctx.settings.snapshot_max_nodes)
         except Exception as exc:
             await ctx.audit.log("task.tab_snapshot_failed", level="warning", error=str(exc)[:200])
+    if kind == "ask" and tab_snap is not None:
+        # An instruction about the form in front of the user ("put my GitHub in link 2", "fill
+        # one portfolio and one LeetCode") changes the page; only questions are answered.
+        from ..applications.page_edits import looks_like_edit
+
+        if tab_snap.form_fields() and looks_like_edit(body.instruction):
+            kind = "edit_page"
+        tab_snap = None  # the checks below are for applying
     if tab_snap is not None:
         from urllib.parse import urlsplit
 
@@ -81,7 +89,7 @@ async def create_task(body: TaskBody, ctx: Ctx, _: Auth) -> dict:
         # otherwise the public page is fetched headlessly.
         job = None
         if tab_snap is not None:
-            job, _ = await ctx.jobs.import_from_snapshot(tab_snap, source_kind="manual")
+            job, _ = await ctx.jobs.import_from_snapshot(tab_snap, source_kind="manual", screen_with_model=False)
         if job is None:
             job, _ = await ctx.jobs.import_url(body.url, source_kind="manual", page_fetcher=None if body.tab_id is not None else ctx.fetch_public_snapshot)
         app = await ctx.repos.applications.get_by_job(job["id"])

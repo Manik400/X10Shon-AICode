@@ -47,7 +47,15 @@ async function loadTabTask(): Promise<void> {
 }
 
 async function refresh(): Promise<void> {
-  state = await send<State>({ kind: 'get_state' });
+  // Each window's side panel follows the active tab of ITS window: two windows open at once
+  // must not show (or act on) the same tab.
+  let windowId: number | undefined;
+  try {
+    windowId = (await chrome.windows.getCurrent()).id;
+  } catch {
+    windowId = undefined;
+  }
+  state = await send<State>({ kind: 'get_state', windowId });
   if (state.config.paired && state.status.connected) await loadTabTask();
   render();
   if (state.config.paired && state.status.connected) {
@@ -314,8 +322,22 @@ try {
 chrome.runtime.onMessage.addListener((msg: { kind?: string }) => {
   if (msg.kind === 'status_changed') void refresh();
 });
-chrome.tabs.onActivated.addListener(() => void refresh());
-chrome.tabs.onUpdated.addListener((_id, info) => {
-  if (info.status === 'complete') void refresh();
+chrome.tabs.onActivated.addListener(async ({ windowId }) => {
+  // Only this window's tab switches concern this panel.
+  try {
+    if ((await chrome.windows.getCurrent()).id !== windowId) return;
+  } catch {
+    /* fall through: refresh anyway */
+  }
+  void refresh();
+});
+chrome.tabs.onUpdated.addListener(async (_id, info, tab) => {
+  if (info.status !== 'complete') return;
+  try {
+    if (tab?.windowId !== undefined && (await chrome.windows.getCurrent()).id !== tab.windowId) return;
+  } catch {
+    /* fall through */
+  }
+  void refresh();
 });
 void refresh();

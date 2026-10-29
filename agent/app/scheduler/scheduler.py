@@ -9,12 +9,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from urllib.parse import urlsplit
 from datetime import datetime
 from typing import Any, Callable
 
 from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
-from ..core.enums import ApplicationState
+from ..core.enums import ApplicationState, TaskStatus
 from ..core.util import now_dt, now_iso
 from ..observability.audit import AuditLogger
 from ..persistence.unit import Repositories
@@ -36,6 +37,14 @@ class SchedulerConfig(BaseModel):
     max_retries: int = Field(default=1, ge=0, le=3, description="Automatic re-attempts after a transient failure (browser hiccup, rate limit, site down); 0 = a failure is final. A job that fails for its own reasons is never retried automatically.")
     retry_base_seconds: float = 60.0
     approval_policy: str = "always"  # always | never | per_site
+    # Unattended runs: sign in with the profile's stored site accounts, create a Workday-style
+    # account with a generated password when none is stored. (LinkedIn Easy Apply jobs are always
+    # left alone.)
+    auto_sign_in: bool = True
+    auto_create_accounts: bool = True
+    # Tabs left open for the user (sign-in, missing answers) before the scheduler stops opening
+    # new jobs: the open ones are finished (resumed as soon as the user has signed in) first.
+    max_waiting_tabs: int = Field(default=3, ge=1, le=20)
     auto_pause_on_resource_pressure: bool = True
     wake_interval_seconds: float = 30.0
     max_ram_mb: int = 8192
@@ -73,6 +82,13 @@ class Scheduler:
         self.last_reason: str = "not started"
         # Answers "could a task open a page right now?" (extension connected / Playwright capacity).
         self.browser_ready: Callable[[], tuple[bool, str]] | None = None
+        # How many pages scheduled tasks may open right now (the headless browser has a small
+        # page limit; starting more tasks than that killed each extra one at once).
+        self.browser_capacity: Callable[[], int] | None = None
+        # Reads a Chrome tab the agent left open for the user (set to the extension driver's
+        # snapshot): a tab where the user has since signed in is resumed before any new job.
+        self.inspect_tab: Callable[[str], Any] | None = None
+        self.close_tab: Callable[[str], Any] | None = None  # closes one of the agent's tabs (extension driver)
         self._hold_until = 0.0
         self._hold_reason = ""
         if hasattr(task_manager, "browser_unavailable_cb"):
@@ -206,9 +222,21 @@ class Scheduler:
             self.last_reason = f"daily limit {cfg.daily_application_limit} reached"
             return {"started": 0, "reason": self.last_reason}
         free = max(0, cfg.max_concurrent_tasks - len(self._tm.running_ids))
+        if self.browser_capacity is not None:
+            free = min(free, max(0, int(self.browser_capacity())))
         if free == 0:
             self.last_reason = "all workers busy"
             return {"started": 0, "reason": self.last_reason}
+        # Open tabs waiting on the user come first: one where the sign-in is done continues now,
+        # and while several are still waiting nothing new is opened on top of them.
+        resumed, waiting_open = await self._continue_waiting_tabs(limit=free)
+        free -= resumed
+        if waiting_open >= cfg.max_waiting_tabs:
+            self.last_reason = f"{waiting_open} tab(s) are waiting for you (sign-in / answers); finish or close them before new jobs are opened" + (f"; resumed {resumed}" if resumed else "")
+            return {"started": resumed, "reason": self.last_reason}
+        if free <= 0:
+            self.last_reason = f"resumed {resumed} waiting tab(s)"
+            return {"started": resumed, "reason": self.last_reason}
         candidates = await self._repos.applications.schedulable(now_iso(), limit=free * 3)
         started = 0
         for app in candidates:
@@ -232,6 +260,75 @@ class Scheduler:
                 self._policy.release_domain(url)
         self.last_reason = f"started {started}" if started else "nothing schedulable"
         return {"started": started, "reason": self.last_reason}
+
+    async def _continue_waiting_tabs(self, *, limit: int) -> tuple[int, int]:
+        """Look at every task waiting on the user in a Chrome tab. A sign-in / verification tab
+        whose page no longer needs a human is resumed (up to ``limit``). Returns (resumed,
+        tabs still open and waiting). A tab the user closed is not counted."""
+        if self.inspect_tab is None:
+            return 0, 0
+        from ..browser.page_state import classify_page
+
+        try:
+            waiting = [t for t in await self._repos.tasks.running() if t["status"] == "waiting_user" and t.get("tab_id")]
+        except Exception:  # noqa: BLE001
+            return 0, 0
+        resumed = 0
+        still_open = 0
+        waiting.sort(key=lambda t: str(t.get("created_at") or ""), reverse=True)
+        for t in waiting[:60]:
+            if still_open >= self._config.max_waiting_tabs and resumed >= limit:
+                break
+            try:
+                snap = await self.inspect_tab(str(t["tab_id"]))
+            except Exception as exc:  # noqa: BLE001 - the tab is gone (closed by the user) or asleep
+                if "no tab" in str(exc).lower():
+                    # Closed by the user: that is their answer to this one. The application keeps
+                    # its waiting state in the dashboard (Retry there reopens it); the task ends.
+                    try:
+                        await self._repos.tasks.set_status(t["id"], TaskStatus.CANCELLED, failure={"category": "USER_CANCELLED", "message": "the tab was closed before the task could continue", "retryable": False})
+                    except Exception:  # noqa: BLE001
+                        pass
+                    continue
+                still_open += 1
+                continue
+            still_open += 1
+            category = (t.get("failure_json") or {}).get("category")
+            if category not in ("AUTH_REQUIRED", "HUMAN_VERIFICATION_REQUIRED") or resumed >= limit:
+                continue
+            cls = classify_page(snap)
+            if cls.needs_human:
+                host = urlsplit(snap.url).netloc.lower().removeprefix("www.")
+                if self.close_tab is not None and await self._signin_parked(host):
+                    # A sign-in wall on a site the agent has given up on: the tab only blocks the
+                    # queue. It is closed; the application stays "sign-in needed" in the dashboard.
+                    try:
+                        await self.close_tab(str(t["tab_id"]))
+                        await self._repos.tasks.set_status(t["id"], TaskStatus.CANCELLED, failure={"category": "AUTH_REQUIRED", "message": f"tab closed: sign-in on {host} failed repeatedly; fix its account under Profile → Site accounts and retry from the dashboard", "retryable": False})
+                        await self._audit.log("task.tab_closed_parked_host", task_id=t["id"], host=host)
+                        still_open -= 1
+                    except Exception as exc:  # noqa: BLE001
+                        log.info("could not close parked tab %s: %s", t.get("tab_id"), exc)
+                continue
+            try:
+                new = await self._tm.resume_task(t["id"])
+                resumed += 1
+                still_open -= 1
+                await self._audit.log("task.auto_resumed", task_id=t["id"], resumed_as=new["id"], url=snap.url, page_kind=cls.kind, by="scheduler")
+            except Exception as exc:  # noqa: BLE001
+                log.info("could not resume waiting task %s: %s", t["id"], exc)
+        return resumed, still_open
+
+    async def _signin_parked(self, host: str) -> bool:
+        """The agent's automatic sign-in failed three or more times on this host recently."""
+        try:
+            row = await self._repos.db.fetch_one(
+                "SELECT COUNT(*) AS n FROM audit_events WHERE event = 'signin.attempt' AND ts >= datetime('now', '-2 days') AND data_json LIKE ? AND data_json LIKE '%\"status\":\"failed\"%'",
+                (f'%"host":"{host}"%',),
+            )
+            return bool(row) and int(row["n"]) >= 3
+        except Exception:  # noqa: BLE001
+            return False
 
     def status(self) -> dict[str, Any]:
         return {"enabled": self._config.enabled, "running": self._task is not None and not self._task.done(), "last_tick": self.last_tick, "last_reason": self.last_reason, "within_active_hours": self.within_active_hours(), "paused": self._policy.paused}

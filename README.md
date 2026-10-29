@@ -37,7 +37,9 @@ This creates `agent/.venv`, installs dependencies and the Playwright headless Ch
 scripts\start.ps1
 ```
 
-Then open <http://127.0.0.1:8765>. On the development machine the agent is registered as the
+Then open <http://127.0.0.1:8765>. `scripts\start-all.ps1` (Desktop shortcut **LFA Start**) starts
+the agent and Ollama when they are down and opens the dashboard: the one-click check after a reboot.
+On the development machine the agent is registered as the
 scheduled task **LFA Agent** (starts at logon, restarts on failure; `scripts\install-autostart.ps1`)
 and keeps its data in `D:\MANIK\Projects\Ext\data` (`agent/.env`). Local test forms are served at
 `/fixtures/...` for end-to-end checks through the real extension.

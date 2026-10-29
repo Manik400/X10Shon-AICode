@@ -109,6 +109,25 @@ export default function Profile() {
         ))}
       </div>
 
+      <h2>Site accounts (automatic sign-in)</h2>
+      <div className="card">
+        <p className="small muted">
+          When a site asks for an account before applying, the agent signs in with the matching entry here (the host or any of its subdomains). Where a site lets applicants create an account (Workday), the agent creates one with your email, a generated password and saves it below. Stored unencrypted in the local database, like the rest of the profile.
+        </p>
+        {(p.accounts ?? []).map((a, i) => (
+          <div key={i} className="row wrap" style={{ gap: 8, marginBottom: 6 }}>
+            <input placeholder="host, e.g. wellfound.com" value={a.host} onChange={(e) => upd({ accounts: (p.accounts ?? []).map((x, j) => (j === i ? { ...x, host: e.target.value } : x)) })} />
+            <input placeholder="email / username" value={a.email} onChange={(e) => upd({ accounts: (p.accounts ?? []).map((x, j) => (j === i ? { ...x, email: e.target.value } : x)) })} />
+            <input type="password" placeholder="password" value={a.password} onChange={(e) => upd({ accounts: (p.accounts ?? []).map((x, j) => (j === i ? { ...x, password: e.target.value } : x)) })} />
+            {a.created_by_agent && <Pill>created by the agent</Pill>}
+            <button className="danger small" onClick={() => upd({ accounts: (p.accounts ?? []).filter((_, j) => j !== i) })}>
+              Remove
+            </button>
+          </div>
+        ))}
+        <button onClick={() => upd({ accounts: [...(p.accounts ?? []), { host: '', email: p.contact.email ?? '', password: '' }] })}>Add account</button>
+      </div>
+
       <h2>Preferences</h2>
       <div className="card form-grid">
         <label>

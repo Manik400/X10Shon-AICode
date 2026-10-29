@@ -416,7 +416,9 @@ chrome.runtime.onMessage.addListener((raw: UiRequest | { kind: string }, _sender
   (async () => {
     switch (msg.kind) {
       case 'get_state': {
-        const [cfg, status, tab] = await Promise.all([getConfig(), getStatus(), chrome.tabs.query({ active: true, lastFocusedWindow: true })]);
+        // The panel names its own window: its active tab, not whichever window was focused last.
+        const query = msg.windowId !== undefined ? { active: true, windowId: msg.windowId } : { active: true, lastFocusedWindow: true };
+        const [cfg, status, tab] = await Promise.all([getConfig(), getStatus(), chrome.tabs.query(query)]);
         const active = tab[0];
         // The window whose side panel is open is where the agent's tabs belong.
         if (active?.windowId !== undefined) await rememberAgentWindow(active.windowId);

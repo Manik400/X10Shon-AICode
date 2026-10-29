@@ -200,6 +200,17 @@ Start-ScheduledTask -TaskName "LFA Agent"          # start it again (also after 
 Unregister-ScheduledTask -TaskName "LFA Agent"     # remove the autostart
 ```
 
+### One click to start everything
+
+```powershell
+scripts\start-all.ps1                  # start the agent and Ollama if they are down, open the dashboard
+scripts\start-all.ps1 -CreateShortcut  # also put an "LFA Start" shortcut on the Desktop
+```
+
+`install-autostart.ps1` creates that shortcut too. After a reboot the agent and Ollama start by
+themselves, but the agent has no window and Ollama needs a minute or two: run **LFA Start** (or
+open <http://127.0.0.1:8765>) to see that both are up.
+
 On macOS/Linux there is no autostart script; run `scripts/start.sh` in a terminal, or wrap it in
 a `launchd` agent / `systemd --user` service that runs `agent/.venv/bin/python agent/run.py`.
 

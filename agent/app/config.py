@@ -68,6 +68,10 @@ class Settings(BaseSettings):
     model_max_response_bytes: int = 64 * 1024
     model_context_chars: int = 8_000  # bound on page context chars sent to a model
     model_cache_ttl_seconds: int = 600
+    # Form filling never waits on the (slow) local model: the rules fill what they can at once,
+    # the model's picks for the rest are applied when they arrive within budget + grace.
+    field_mapper_budget_seconds: float = 15.0
+    field_mapper_grace_seconds: float = 45.0
     model_roles: dict[str, ModelRoleConfig] = Field(
         default_factory=lambda: {
             "intent": ModelRoleConfig(),

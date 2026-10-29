@@ -153,3 +153,34 @@ def test_submit_and_next_detection(sample_profile) -> None:
 def test_heuristic_mapper_only_uses_known_keys() -> None:
     out = heuristic_map_fields([{"node": 0, "label": "Email", "type": "email"}], ["contact.first_name"], [])
     assert out[0]["profile_key"] is None and out[0]["confidence"] < 0.5
+
+
+def test_closest_option_by_shared_words() -> None:
+    from app.applications.field_mapping import _choose_option
+
+    opts = ["Career Site", "Company Website", "Job Board", "Employee Referral", "Social Media", "Other"]
+    assert _choose_option(opts, "Company careers website") == "Company Website"
+    assert _choose_option(["Job Board", "Social Media", "Other"], "LinkedIn") is None  # nothing shared: not guessed
+    assert _choose_option(["LinkedIn", "Indeed", "Naukri"], "LinkedIn job post") == "LinkedIn"
+    assert _choose_option(["Yes", "No"], "No") == "No"
+    assert _choose_option(["Website A", "Website B"], "company website") is None  # a tie is not a pick
+
+
+def test_workday_phone_block_national_number_and_device_type() -> None:
+    from app.applications.field_mapping import build_fill_plan
+    from app.browser.snapshot import SnapshotNode
+    from app.core.enums import Provenance
+
+    facts = {"contact.phone": ("+91 9315605606", Provenance.VERIFIED_FACT), "contact.email": ("m@example.com", Provenance.VERIFIED_FACT)}
+    nodes = [
+        SnapshotNode(i=10, role="combobox", name="Phone Device Type*", tag="button", options=["Select One", "Mobile", "Home", "Work"], required=True, visible=True),
+        SnapshotNode(i=12, role="listbox", name="items selected", tag="ul", visible=True),
+        SnapshotNode(i=13, role="combobox", name="Country Phone Code*", tag="input", type="text", value="India (+91)", visible=True),
+        SnapshotNode(i=16, role="textbox", name="Phone Number*", tag="input", type="text", required=True, visible=True),
+        SnapshotNode(i=17, role="textbox", name="Phone Extension", tag="input", type="text", visible=True),
+    ]
+    plan = build_fill_plan(nodes, facts, [], None, resumes=[], default_resume_id=None, submit_names=["Submit"])
+    by = {f.node: f for f in plan.fields}
+    assert by[16].value == "9315605606" and by[16].status == "auto"
+    assert by[10].value == "Mobile" and by[10].status == "auto"
+    assert by[17].status != "auto" or not by[17].value

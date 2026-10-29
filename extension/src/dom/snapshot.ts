@@ -61,7 +61,8 @@ const INTERACTIVE_ROLES = new Set([
   'date',
 ]);
 
-function* walk(root: Node, frame: number): Generator<{ el: Element; frame: number }> {
+function* walk(root: Node | null, frame: number): Generator<{ el: Element; frame: number }> {
+  if (!root) return; // a document caught mid-navigation has no body yet
   const tw = (root.ownerDocument || (root as Document)).createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
   let cur = tw.currentNode as Element | null;
   if (root.nodeType === Node.ELEMENT_NODE) yield { el: root as Element, frame };
@@ -129,7 +130,12 @@ function modalDialog(doc: Document): HTMLElement | null {
   const candidates = Array.from(doc.querySelectorAll<HTMLElement>('dialog[open],[role="dialog"]:not([aria-hidden="true"]),[role="alertdialog"]'));
   for (const d of candidates) {
     if (d.getClientRects().length === 0) continue;
-    const isModal = d.matches('dialog[open]') || d.getAttribute('aria-modal') === 'true' || d.getAttribute('role') === 'alertdialog';
+    // Workday's "Start Your Application" popup is role=dialog without aria-modal; any dialog that
+    // takes a good part of the viewport replaces the page for the user just the same.
+    const r = d.getBoundingClientRect();
+    const win = d.ownerDocument.defaultView;
+    const large = !!win && r.width * r.height >= 0.2 * win.innerWidth * win.innerHeight;
+    const isModal = d.matches('dialog[open]') || d.getAttribute('aria-modal') === 'true' || d.getAttribute('role') === 'alertdialog' || d.matches('[data-automation-id="wd-popup-frame"]') || large;
     const isPicker = !!d.querySelector('[role="listbox"],[role="option"]') && d.querySelectorAll('input,textarea,button').length <= 3;
     if (isModal && !isPicker) return d;
   }

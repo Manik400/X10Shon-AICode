@@ -21,6 +21,20 @@ _SIGNUP_URL = re.compile(r"/(signup|sign-up|sign_up|register|registration|join|c
 _RECOVERY_RE = re.compile(r"(forgot (your )?password|reset (your )?password|password reset|recover (your )?account)", re.I)
 _LOCKED_RE = re.compile(r"(account (is |has been )?(locked|suspended|disabled)|too many (failed )?attempts|unusual activity)", re.I)
 _SIGNUP_RE = re.compile(r"(create (an |your )?account|sign up|register|new user)", re.I)
+# A title or heading that IS a sign-in prompt and nothing else ("Sign In", "Log in to apply",
+# "Welcome back"). Workday sends applicants to a page whose only controls are "Sign in with
+# Google" / "Sign in with email": no password box yet, so the field-based checks never fire.
+_SIGNIN_LABEL_RE = re.compile(
+    r"^\s*(sign ?in|log ?in|login|welcome back|create (an |your )?account|sign ?up|register)"
+    r"\s*(to (continue|apply|proceed|your account)|or (sign ?up|create an account|register|log ?in|sign ?in))?\s*[.!:]?\s*$",
+    re.I,
+)
+
+
+def signin_label(text: str | None) -> bool:
+    """True when a short title/heading is only a sign-in prompt (the part before ' | ' / ' - ')."""
+    head = re.split(r"\s[|\-–—]\s|\|", (text or "").strip(), maxsplit=1)[0]
+    return len(head) <= 40 and bool(_SIGNIN_LABEL_RE.match(head))
 _CONFIRM_RE = re.compile(
     r"(thank(s| you) for (applying|your application|submitting)|application (has been )?(received|submitted|sent|complete)|we('ve| have) (received|got) your application|successfully (submitted|applied)|your application (was|has been) (submitted|sent|received)|application submitted)",
     re.I,
@@ -143,6 +157,11 @@ def classify_page(snap: PageSnapshot) -> PageClassification:
         return PageClassification("login", AuthState.NEW_ACCOUNT_FLOW, reasons, refs, list(s.unsupported_reasons))
     if _LOGIN_URL.search(snap.url) and s.has_email_or_username_field and not s.logout_cta_present:
         reasons.append("login URL with credential field")
+        return PageClassification("login", AuthState.LOGGED_OUT, reasons, refs, list(s.unsupported_reasons))
+    titled_signin = signin_label(snap.title) or any(n.role == "heading" and n.visible and signin_label(n.text or n.name) for n in snap.nodes)
+    if titled_signin and (s.login_cta_present or s.signup_cta_present or s.has_email_or_username_field) and not s.logout_cta_present and not _application_form_present(snap):
+        # A sign-in chooser page (Workday: "Sign In" with "Sign in with Google / with email").
+        reasons.append("sign-in page (title or heading)")
         return PageClassification("login", AuthState.LOGGED_OUT, reasons, refs, list(s.unsupported_reasons))
 
     # 3. Outcome pages.

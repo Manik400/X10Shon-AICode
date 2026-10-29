@@ -10,10 +10,43 @@ from pydantic import BaseModel, ConfigDict, Field
 class IntentOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    kind: Literal["apply", "apply_list", "extract_job", "navigate", "read", "contacts", "track", "general", "ask", "fill_page"]
+    kind: Literal["apply", "apply_list", "extract_job", "navigate", "read", "contacts", "track", "general", "ask", "fill_page", "edit_page"]
     confidence: float = Field(ge=0, le=1)
     url: str | None = None
     notes: str | None = Field(default=None, max_length=300)
+
+
+class OptionPick(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    node: int
+    option: str = Field(max_length=300)
+
+
+class OptionPicksOutput(BaseModel):
+    """For dropdown questions whose options do not literally contain the candidate's answer: the
+    option that means the same thing, or none."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    picks: list[OptionPick] = Field(default_factory=list)
+
+
+class EditItem(BaseModel):
+    """One change to a field of the form in front of the user (edit_page)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    node: int
+    value: str = Field(max_length=4000)
+    reason: str = Field(default="", max_length=200)
+
+
+class EditsOutput(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    edits: list[EditItem] = Field(default_factory=list)
+    note: str = Field(default="", max_length=400)
 
 
 class AnswerOutput(BaseModel):

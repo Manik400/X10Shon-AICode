@@ -106,6 +106,77 @@ US_ONLY_RE = re.compile(r"only (be )?(able to )?hir(e|ing) (with)?in the (u\.?s\
 _CLEARANCE_RE = re.compile(r"\bts\s*/\s*sci\b|top[- ]secret|(active|current|secret|government|security)[- ]clearance|clearance (is )?required|polygraph|u\.?s\.? citizenship (is )?required|must be a u\.?s\.? citizen|requires? u\.?s\.? citizenship", re.I)
 
 
+_WF_LOCATION_RE = re.compile(r"Job Location\s+(?P<loc>.{2,120}?)\s+Remote Work Policy\s+(?P<policy>.{2,60}?)(?=\s+(Visa Sponsorship|Relocation|Skills|Hires remotely|About the job))", re.I | re.S)
+_WF_HIRES_IN_RE = re.compile(r"Hires remotely(?: in)?:?\s+(?P<where>.{2,160}?)(?=\s+(Visa Sponsorship|Relocation|Skills|About the job|Job Location|Remote Work Policy)|\.|$)", re.I | re.S)
+_WF_VISA_RE = re.compile(r"Visa Sponsorship\s+(?P<visa>Not Available|Available|Required|Not Required)", re.I)
+_WF_RELOC_RE = re.compile(r"Relocation\s+(?P<reloc>Not Allowed|Allowed|Required)", re.I)
+_ONSITE_RE = re.compile(r"in[- ]office|on[- ]?site|hybrid|wfh flexibility|office", re.I)
+_REMOTE_ONLY_RE = re.compile(r"remote only|fully remote|remote[- ]first|remote$", re.I)
+_LOCATION_WALL_RE = re.compile(
+    r"(?:is not|isn'?t|not currently|does ?n[o']t|do ?n[o']t) (?:hiring|accept(?:ing)? (?:applications|applicants|candidates)) (?:in|from|for) (?:your|this) (?:location|country|region|area|time ?zone)"
+    r"|(?:applications?|applicants|candidates) (?:are |is )?not (?:accepted|considered) (?:from|in|outside) (?:your|this) (?:location|country|region|area)"
+    r"|must be (?:located|based|resident|living) in (?P<must>(?:the )?[A-Z][A-Za-z .,&/-]{2,60}?)(?=[.!?,;]|\s(?:to|and|or|for)\b|$)"
+    r"|only (?:accepting|considering|hiring) (?:applications|applicants|candidates) (?:from|in|located in|based in) (?P<only>(?:the )?[A-Z][A-Za-z .,&/-]{2,60}?)(?=[.!?,;]|\s(?:to|and|or|for)\b|$)",
+)
+
+
+def _candidate_countries(profile: dict[str, Any]) -> set[str]:
+    from ..applications.profile import countries_in
+
+    out: set[str] = set()
+    out |= countries_in(str(((profile.get("contact") or {}).get("country")) or ""))
+    for c in (profile.get("legal") or {}).get("work_authorized_countries") or []:
+        out |= countries_in(str(c))
+    return out
+
+
+def location_blocker(page_text: str, profile: dict[str, Any]) -> str | None:
+    """Why the candidate cannot be hired for this posting because of where they are, read from
+    the page itself (Wellfound's job facts: location, remote policy, "hires remotely in",
+    visa sponsorship, relocation; or a site's own "not hiring in your location" notice), or None.
+
+    Only decided when the profile says where the candidate is (contact country / work rights)
+    and the page names countries that exclude it. A remote job that hires in the candidate's
+    country, or an on-site job that sponsors visas or allows relocation, is not blocked."""
+    from ..applications.profile import countries_in
+
+    text = " ".join((page_text or "").split())
+    if not text:
+        return None
+    m = _LOCATION_WALL_RE.search(text)
+    if m:
+        named = m.group("must") or m.group("only") or ""
+        mine = _candidate_countries(profile)
+        if not named:
+            return f"the site says it is not hiring in your location (\"{m.group(0)[:100]}\")"
+        where = countries_in(named) - {"European Union"}
+        if where and mine and not (where & mine):
+            return f"hires only people in {named.strip()} (\"{m.group(0)[:100]}\")"
+        if not where:
+            return None
+    mine = _candidate_countries(profile)
+    if not mine:
+        return None
+    hires = _WF_HIRES_IN_RE.search(text)
+    if hires:
+        where = countries_in(hires.group("where")) - {"European Union"}
+        if where and not (where & mine):
+            return f"hires remotely only in {hires.group('where').strip()[:80]}; you are in {', '.join(sorted(mine))}"
+    loc = _WF_LOCATION_RE.search(text)
+    if loc:
+        where = countries_in(loc.group("loc")) - {"European Union"}
+        policy = loc.group("policy")
+        onsite = bool(_ONSITE_RE.search(policy)) and not _REMOTE_ONLY_RE.search(policy)
+        visa = _WF_VISA_RE.search(text)
+        reloc = _WF_RELOC_RE.search(text)
+        no_visa = bool(visa and visa.group("visa").lower() == "not available")
+        no_reloc = bool(reloc and reloc.group("reloc").lower() == "not allowed")
+        if where and not (where & mine) and onsite and (no_visa or no_reloc):
+            why = " and ".join(x for x, on in (("no visa sponsorship", no_visa), ("no relocation", no_reloc)) if on)
+            return f"{policy.strip()} in {loc.group('loc').strip()[:60]} with {why}; you are in {', '.join(sorted(mine))}"
+    return None
+
+
 def eligibility_blockers(job: dict[str, Any], profile: dict[str, Any]) -> list[str]:
     """Hard requirements the candidate cannot meet, from the posting and the profile's verified
     work rights. Unlike preference filters these stop list-apply too: applying cannot succeed.
